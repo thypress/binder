@@ -71,6 +71,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -78,11 +79,11 @@ jobs:
           tag_name: ${{ inputs.version || github.ref_name }}
           name: thypress ${{ inputs.version || github.ref_name }}
           files: |
-            ./artifacts/thypress-linux-x64/thypress-linux-x64
-            ./artifacts/thypress-linux-arm64/thypress-linux-arm64
-            ./artifacts/thypress-macos-x64/thypress-macos-x64
-            ./artifacts/thypress-macos-arm64/thypress-macos-arm64
-            ./artifacts/thypress-windows-x64/thypress-windows-x64.exe
+            ./artifacts/thypress-linux-x64
+            ./artifacts/thypress-linux-arm64
+            ./artifacts/thypress-macos-x64
+            ./artifacts/thypress-macos-arm64
+            ./artifacts/thypress-windows-x64.exe
           body: |
             ## thypress ${{ inputs.version || github.ref_name }}
 
@@ -100,27 +101,17 @@ jobs:
             ### Installation
 
             **One-liner (Linux/macOS):**
-```bash
-            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
-```
-
-            **Manual Download:**
-            - **Linux x64**: thypress-linux-x64
-            - **Linux ARM64**: thypress-linux-arm64 (Raspberry Pi, AWS Graviton)
-            - **macOS Intel**: thypress-macos-x64
-            - **macOS ARM**: thypress-macos-arm64
-            - **Windows**: thypress-windows-x64.exe
+            ```bash
+            curl -fsSL [https://raw.githubusercontent.com/$](https://raw.githubusercontent.com/$){{ github.repository }}/main/install.sh | bash
+            ```
 
             **npm:**
-```bash
+            ```bash
             npm install -g thypress
-```
+            ```
 
             ### Quick Start
-```bash
-            thypress              # Start dev server
-            thypress build        # Build static site
-```
-
-            ### Documentation
-            https://github.com/${{ github.repository }}
+            ```bash
+            thypress            # Start dev server
+            thypress build      # Build static site
+            ```
