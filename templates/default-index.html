@@ -1,0 +1,157 @@
+<!-- SPDX-License-Identifier: MPL-2.0
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blog</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <link rel="alternate" type="application/rss+xml" title="RSS Feed" href="/rss.xml">
+</head>
+<body>
+  {{#if navigation}}
+  <aside>
+    <h2>Navigation</h2>
+    <nav>
+      {{#each navigation}}
+        {{#if (eq this.type "folder")}}
+          <details open>
+            <summary>{{this.title}}</summary>
+            <ul>
+              {{#each this.children}}
+                <li><a href="/post/{{this.slug}}/">{{this.title}}</a></li>
+              {{/each}}
+            </ul>
+          </details>
+        {{else}}
+          <div>
+            <a href="/post/{{this.slug}}/">{{this.title}}</a>
+          </div>
+        {{/if}}
+      {{/each}}
+    </nav>
+  </aside>
+  {{/if}}
+
+  <main>
+    <h1>Posts</h1>
+
+    <div class="search">
+      <input type="text" id="search" placeholder="Search posts..." autocomplete="off">
+      <div class="search-results" id="search-results"></div>
+    </div>
+
+    <ul class="posts" id="posts-list">
+      {{#each posts}}
+      <li>
+        <h3><a href="/post/{{slug}}/">{{title}}</a></h3>
+        <div class="meta">{{date}}</div>
+        {{#if description}}
+        <p class="description">{{description}}</p>
+        {{/if}}
+        {{#if tags}}
+        <div class="tags">
+          {{#each tags}}<a href="/tag/{{this}}/">{{this}}</a>{{/each}}
+        </div>
+        {{/if}}
+      </li>
+      {{/each}}
+    </ul>
+
+    {{#if pagination}}
+    <nav class="pagination">
+      {{#if pagination.hasPrev}}
+        <a href="{{#if (eq pagination.prevPage 1)}}/{{else}}/page/{{pagination.prevPage}}/{{/if}}">Previous</a>
+      {{/if}}
+
+      {{#each pagination.pages}}
+        {{#if (eq this ../pagination.currentPage)}}
+          <strong>{{this}}</strong>
+        {{else if (eq this "...")}}
+          <span>...</span>
+        {{else}}
+          <a href="{{#if (eq this 1)}}/{{else}}/page/{{this}}/{{/if}}">{{this}}</a>
+        {{/if}}
+      {{/each}}
+
+      {{#if pagination.hasNext}}
+        <a href="/page/{{pagination.nextPage}}/">Next</a>
+      {{/if}}
+    </nav>
+    {{/if}}
+
+    <hr>
+    <p><a href="/rss.xml">RSS</a> | <a href="/sitemap.xml">Sitemap</a></p>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0"></script>
+  <script>
+    let fuse;
+    const searchInput = document.getElementById('search');
+    const searchResults = document.getElementById('search-results');
+    const postsList = document.getElementById('posts-list');
+
+    fetch('/search.json')
+      .then(r => r.json())
+      .then(data => {
+        fuse = new Fuse(data, {
+          keys: ['title', 'content', 'tags', 'description'],
+          threshold: 0.3
+        });
+      })
+      .catch(err => console.error('Search failed:', err));
+
+    searchInput.addEventListener('input', (e) => {
+      const query = e.target.value.trim();
+
+      if (!query) {
+        searchResults.style.display = 'none';
+        postsList.style.display = 'block';
+        return;
+      }
+
+      if (!fuse) {
+        searchResults.innerHTML = '<p>Loading...</p>';
+        searchResults.style.display = 'block';
+        return;
+      }
+
+      const results = fuse.search(query);
+
+      if (results.length === 0) {
+        searchResults.innerHTML = '<p>No results found.</p>';
+      } else {
+        searchResults.innerHTML = results.slice(0, 10).map(result => {
+          const post = result.item;
+          return `
+            <div class="search-result">
+              <h4><a href="/post/${post.slug}/">${post.title}</a></h4>
+              <div class="meta">${post.date}</div>
+              ${post.description ? `<p>${post.description}</p>` : ''}
+            </div>
+          `;
+        }).join('');
+      }
+
+      searchResults.style.display = 'block';
+      postsList.style.display = 'none';
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!searchInput.contains(e.target) && !searchResults.contains(e.target)) {
+        if (searchInput.value === '') {
+          searchResults.style.display = 'none';
+          postsList.style.display = 'block';
+        }
+      }
+    });
+  </script>
+</body>
+</html>
