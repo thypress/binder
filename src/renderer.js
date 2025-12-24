@@ -7,6 +7,7 @@
 
 import MarkdownIt from 'markdown-it';
 import markdownItHighlight from 'markdown-it-highlightjs';
+import markdownItAnchor from 'markdown-it-anchor';
 import Handlebars from 'handlebars';
 import matter from 'gray-matter';
 import { Feed } from 'feed';
@@ -20,11 +21,15 @@ import { fileURLToPath } from 'url';
 
 const md = new MarkdownIt();
 md.use(markdownItHighlight);
+md.use(markdownItAnchor, {
+  permalink: false,
+  slugify: (s) => s.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '')
+});
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 export const POSTS_PER_PAGE = 10;
-const IMAGE_SIZES = [400, 800, 1200];
+const STANDARD_IMAGE_SIZES = [400, 800, 1200];
 
 // Cache navigation hash for incremental rebuilds
 let navigationHash = null;
@@ -96,6 +101,24 @@ function setupImageOptimizer(md) {
     // Generate the output URL path (relative to /post/ output directory)
     const urlBase = outputDir === '.' ? '' : `${outputDir}/`;
 
+    // Determine actual sizes to generate based on image dimensions
+    let sizesToGenerate = [...STANDARD_IMAGE_SIZES];
+
+    // Check if dimensions are cached
+    const imageDimensionsCache = env.imageDimensionsCache || new Map();
+    const originalWidth = imageDimensionsCache.get(resolvedImagePath);
+
+    if (originalWidth) {
+      // Filter sizes smaller than original
+      sizesToGenerate = STANDARD_IMAGE_SIZES.filter(size => size < originalWidth);
+
+      // Add original size if not already present
+      if (!sizesToGenerate.includes(originalWidth)) {
+        sizesToGenerate.push(originalWidth);
+      }
+      sizesToGenerate.sort((a, b) => a - b);
+    }
+
     // Store image reference for collection during scanning phase
     if (!env.referencedImages) env.referencedImages = [];
     env.referencedImages.push({
@@ -104,21 +127,22 @@ function setupImageOptimizer(md) {
       outputPath: outputImagePath,
       basename,
       hash,
-      urlBase
+      urlBase,
+      sizesToGenerate // Store actual sizes to generate
     });
 
-    // Generate responsive picture element
+    // Generate responsive picture element with actual sizes
     return `<picture>
   <source
-    srcset="${IMAGE_SIZES.map(size => `/post/${urlBase}${basename}-${size}-${hash}.webp ${size}w`).join(', ')}"
+    srcset="${sizesToGenerate.map(size => `/post/${urlBase}${basename}-${size}-${hash}.webp ${size}w`).join(', ')}"
     type="image/webp"
-    sizes="(max-width: 400px) 400px, (max-width: 800px) 800px, 1200px">
+    sizes="(max-width: ${sizesToGenerate[0]}px) ${sizesToGenerate[0]}px, (max-width: ${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}px) ${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}px, ${sizesToGenerate[sizesToGenerate.length - 1]}px">
   <source
-    srcset="${IMAGE_SIZES.map(size => `/post/${urlBase}${basename}-${size}-${hash}.jpg ${size}w`).join(', ')}"
+    srcset="${sizesToGenerate.map(size => `/post/${urlBase}${basename}-${size}-${hash}.jpg ${size}w`).join(', ')}"
     type="image/jpeg"
-    sizes="(max-width: 400px) 400px, (max-width: 800px) 800px, 1200px">
+    sizes="(max-width: ${sizesToGenerate[0]}px) ${sizesToGenerate[0]}px, (max-width: ${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}px) ${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}px, ${sizesToGenerate[sizesToGenerate.length - 1]}px">
   <img
-    src="/post/${urlBase}${basename}-800-${hash}.jpg"
+    src="/post/${urlBase}${basename}-${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}-${hash}.jpg"
     alt="${alt}"
     loading="lazy"
     decoding="async">
@@ -128,15 +152,35 @@ function setupImageOptimizer(md) {
 
 setupImageOptimizer(md);
 
-export async function optimizeImage(imagePath, outputDir) {
+export async function optimizeImage(imagePath, outputDir, sizesToGenerate = STANDARD_IMAGE_SIZES) {
   const ext = path.extname(imagePath);
   const name = path.basename(imagePath, ext);
   const hash = crypto.createHash('md5').update(imagePath).digest('hex').substring(0, 8);
 
+  // If sizes not provided, determine from image dimensions
+  if (!sizesToGenerate || sizesToGenerate.length === 0) {
+    try {
+      const metadata = await sharp(imagePath).metadata();
+      const originalWidth = metadata.width;
+
+      // Filter standard sizes smaller than original
+      sizesToGenerate = STANDARD_IMAGE_SIZES.filter(size => size < originalWidth);
+
+      // Add original size if not present
+      if (!sizesToGenerate.includes(originalWidth)) {
+        sizesToGenerate.push(originalWidth);
+      }
+      sizesToGenerate.sort((a, b) => a - b);
+    } catch (error) {
+      // Fallback to standard sizes
+      sizesToGenerate = STANDARD_IMAGE_SIZES;
+    }
+  }
+
   const optimized = [];
 
   try {
-    for (const size of IMAGE_SIZES) {
+    for (const size of sizesToGenerate) {
       // Generate WebP
       const webpFilename = `${name}-${size}-${hash}.webp`;
       const webpPath = path.join(outputDir, webpFilename);
@@ -254,8 +298,45 @@ export function loadAllPosts() {
   const slugMap = new Map();
   const imageReferences = new Map();
   const brokenImages = [];
+  const imageDimensionsCache = new Map(); // Cache for image dimensions
 
   const postsDir = process.env.thypress_POSTS_DIR || path.join(__dirname, '../posts');
+
+  async function preScanImageDimensions(content, relativePath) {
+    // Extract all image references from markdown
+    const imageMatches = content.matchAll(/!\[.*?\]\((.*?)\)/g);
+
+    for (const match of imageMatches) {
+      const src = match[1];
+
+      // Skip external images
+      if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('//')) {
+        continue;
+      }
+
+      // Resolve image path (same logic as in setupImageOptimizer)
+      let resolvedImagePath;
+      if (src.startsWith('/')) {
+        resolvedImagePath = path.join(postsDir, src.substring(1));
+      } else if (src.startsWith('./') || src.startsWith('../')) {
+        const postDir = path.dirname(path.join(postsDir, relativePath));
+        resolvedImagePath = path.resolve(postDir, src);
+      } else {
+        const postDir = path.dirname(path.join(postsDir, relativePath));
+        resolvedImagePath = path.resolve(postDir, src);
+      }
+
+      // Read dimensions if file exists and not already cached
+      if (fs.existsSync(resolvedImagePath) && !imageDimensionsCache.has(resolvedImagePath)) {
+        try {
+          const metadata = await sharp(resolvedImagePath).metadata();
+          imageDimensionsCache.set(resolvedImagePath, metadata.width);
+        } catch (error) {
+          // Skip if can't read dimensions
+        }
+      }
+    }
+  }
 
   function loadPostsFromDir(dir, relativePath = '') {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -275,7 +356,16 @@ export function loadAllPosts() {
           const rawContent = fs.readFileSync(fullPath, 'utf-8');
           const { data: frontMatter, content } = matter(rawContent);
 
-          const env = { postRelativePath: relPath, referencedImages: [] };
+          // Pre-scan images to cache dimensions (async but we'll handle it)
+          // For now, we'll do this synchronously in the render phase
+          // and accept that first render won't have optimized sizes
+
+          const env = {
+            postRelativePath: relPath,
+            referencedImages: [],
+            imageDimensionsCache // Pass the cache
+          };
+
           const renderedHtml = isMarkdown ? md.render(content, env) : `<pre>${content}</pre>`;
 
           if (env.referencedImages.length > 0) {
@@ -336,6 +426,16 @@ export function loadAllPosts() {
           const tags = Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []);
           const description = frontMatter.description || '';
 
+          // Extract first image for OG tags (if available)
+          let ogImage = frontMatter.image || null;
+          if (!ogImage && env.referencedImages.length > 0) {
+            // Use first image from post
+            const firstImg = env.referencedImages[0];
+            // Use middle size for OG image (typically 800px)
+            const ogSize = firstImg.sizesToGenerate[Math.floor(firstImg.sizesToGenerate.length / 2)] || 800;
+            ogImage = `/post/${firstImg.urlBase}${firstImg.basename}-${ogSize}-${firstImg.hash}.jpg`;
+          }
+
           postsCache.set(slug, {
             filename: relPath,
             slug: slug,
@@ -346,7 +446,8 @@ export function loadAllPosts() {
             content: content,
             renderedHtml: renderedHtml,
             frontMatter: frontMatter,
-            relativePath: relPath
+            relativePath: relPath,
+            ogImage: ogImage // Store for OG tags
           });
         } catch (error) {
           console.error(`Error loading post '${relPath}': ${error.message}`);
@@ -356,6 +457,40 @@ export function loadAllPosts() {
   }
 
   try {
+    // First pass: scan all images and cache dimensions
+    const allFiles = [];
+
+    function collectFiles(dir, relativePath = '') {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+
+        if (entry.isDirectory()) {
+          collectFiles(fullPath, relPath);
+        } else if (entry.name.endsWith('.md') || entry.name.endsWith('.txt')) {
+          allFiles.push({ fullPath, relPath, isMarkdown: entry.name.endsWith('.md') });
+        }
+      }
+    }
+
+    collectFiles(postsDir);
+
+    // Pre-scan all images
+    (async () => {
+      for (const file of allFiles) {
+        if (file.isMarkdown) {
+          const rawContent = fs.readFileSync(file.fullPath, 'utf-8');
+          const { content } = matter(rawContent);
+          await preScanImageDimensions(content, file.relPath);
+        }
+      }
+    })().then(() => {
+      // After dimensions are cached, we're ready
+      // (This happens async but won't block initial load)
+    });
+
+    // Second pass: load all posts (dimensions may not be cached yet on first run)
     loadPostsFromDir(postsDir);
     console.log(`✓ Loaded ${postsCache.size} posts`);
   } catch (error) {
@@ -373,7 +508,7 @@ export function loadAllPosts() {
     navigationHash = newHash;
   }
 
-  return { postsCache, slugMap, navigation, imageReferences, brokenImages };
+  return { postsCache, slugMap, navigation, imageReferences, brokenImages, imageDimensionsCache };
 }
 
 export function loadTemplates() {
@@ -450,7 +585,7 @@ export function getPaginationData(postsCache, currentPage) {
   };
 }
 
-export function renderPostsList(postsCache, page, templates, navigation) {
+export function renderPostsList(postsCache, page, templates, navigation, siteConfig = {}) {
   const startIndex = (page - 1) * POSTS_PER_PAGE;
 
   const allPosts = getPostsSorted(postsCache);
@@ -471,26 +606,51 @@ export function renderPostsList(postsCache, page, templates, navigation) {
     throw new Error('Index template not found');
   }
 
+  // Get site config with defaults
+  const {
+    title: siteTitle = 'My Blog',
+    description: siteDescription = 'A blog powered by thypress',
+    url: siteUrl = 'https://example.com'
+  } = siteConfig;
+
   return indexTpl({
     posts: posts,
     pagination: pagination,
-    navigation: navigation
+    navigation: navigation,
+    siteTitle: siteTitle,
+    siteDescription: siteDescription,
+    siteUrl: siteUrl
   });
 }
 
-export function renderPost(post, slug, templates, navigation) {
+export function renderPost(post, slug, templates, navigation, siteConfig = {}) {
   const postTpl = templates.get('post');
   if (!postTpl) {
     throw new Error('Post template not found');
   }
 
+  // Get site config with defaults
+  const {
+    title: siteTitle = 'My Blog',
+    url: siteUrl = 'https://example.com',
+    author = 'Anonymous'
+  } = siteConfig;
+
+  // Convert date to ISO format for article:published_time
+  const dateISO = new Date(post.date).toISOString();
+
   return postTpl({
     content: post.renderedHtml,
     title: post.title,
     date: post.date,
+    dateISO: dateISO,
     tags: post.tags,
     description: post.description,
     slug: slug,
+    ogImage: post.ogImage || null,
+    siteTitle: siteTitle,
+    siteUrl: siteUrl,
+    author: author,
     navigation: navigation
   });
 }

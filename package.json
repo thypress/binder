@@ -18,14 +18,15 @@
     "build:exe": "bun build ./src/cli.js --compile --windows-icon=./icon.ico --windows-publisher=\"THYPRESS™\" --windows-title=\"THYPRESS BINDER\" --windows-description=\"Dead simple markdown blog/docs engine\" --windows-version=\"0.1.0\" --windows-copyright=\"© 2026 THYPRESS™\" --outfile=\"THYPRESS BINDER\""
   },
   "dependencies": {
-    "markdown-it": "^14.0.0",
-    "markdown-it-highlightjs": "^4.0.1",
-    "highlight.js": "^11.9.0",
-    "handlebars": "^4.7.8",
-    "gray-matter": "^4.0.3",
     "feed": "^4.2.2",
-    "sitemap": "^7.1.1",
-    "sharp": "^0.33.0"
+    "gray-matter": "^4.0.3",
+    "handlebars": "^4.7.8",
+    "highlight.js": "^11.9.0",
+    "markdown-it": "^14.0.0",
+    "markdown-it-anchor": "^9.2.0",
+    "markdown-it-highlightjs": "^4.0.1",
+    "sharp": "^0.33.0",
+    "sitemap": "^7.1.1"
   },
   "keywords": [
     "blog",

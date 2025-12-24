@@ -1,4 +1,4 @@
-# thypress 🎨
+# ¶ THYPRESS
 
 Dead simple markdown blog/docs engine. One binary, zero config.
 
@@ -7,7 +7,7 @@ Dead simple markdown blog/docs engine. One binary, zero config.
 - ✅ Single binary - no dependencies
 - ✅ Front matter support (YAML)
 - ✅ Folder-based navigation (perfect for docs)
-- ✅ Client-side search (Fuse.js)
+- ✅ Client-side search (MiniSearch)
 - ✅ Tag pages
 - ✅ RSS feed & Sitemap
 - ✅ Image optimization (WebP + responsive)
@@ -22,16 +22,17 @@ Dead simple markdown blog/docs engine. One binary, zero config.
 Get the latest release for your platform:
 
 - **Linux**: `thypress-linux-x64`
+- **Linux ARM**: `thypress-linux-arm64`
 - **macOS Intel**: `thypress-macos-x64`
 - **macOS ARM**: `thypress-macos-arm64`
 - **Windows**: `thypress-windows-x64.exe`
 
 **Quick install (Linux/macOS):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yourusername/thypress/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thypress/binder/main/install.sh | bash
 ```
 
-**Or download manually from [Releases](https://github.com/yourusername/thypress/releases)**
+**Or download manually from [Releases](https://github.com/thypress/binder/releases)**
 
 ### npm
 ```bash
@@ -40,7 +41,7 @@ npm install -g thypress
 
 ### Build from Source
 ```bash
-git clone https://github.com/yourusername/thypress.git
+git clone https://github.com/thypress/binder.git
 cd thypress
 bun install
 bun run build:exe
@@ -69,12 +70,12 @@ your-blog/
 │   │   └── setup.md
 │   └── api/
 │       └── reference.md
+│       └── screenshot.jpg
 ├── public/             # Templates (auto-created)
 │   ├── index.html
 │   ├── post.html
 │   ├── tag.html
-│   ├── style.css
-│   └── img/            # Put images here
+│   └── style.css
 ├── config.json         # Site configuration
 └── build/              # Generated static site
 ```
@@ -170,7 +171,7 @@ Edit `public/index.html`, `public/post.html`, and `public/tag.html`.
 
 ## Images
 
-Put images in `public/img/` and reference in markdown:
+Put images anywhere within `/posts` hierarchy and just reference in markdown:
 ```markdown
 ![My image](img/photo.jpg)
 ```
@@ -182,7 +183,7 @@ Build process automatically creates:
 
 ## Search
 
-Client-side search with Fuse.js works automatically.
+Client-side search with MiniSearch works automatically.
 
 Search index available at `/search.json`.
 
@@ -213,7 +214,7 @@ bun run build:exe
 
 ## License
 
-MIT License - see [LICENSE](LICENSE)
+Mozilla Public License Version 2.0
 
 ## Contributing
 
@@ -226,32 +227,6 @@ Built with:
 - [markdown-it](https://github.com/markdown-it/markdown-it)
 - [Handlebars](https://handlebarsjs.com)
 - [Sharp](https://sharp.pixelplumbing.com)
-- [Fuse.js](https://fusejs.io)
+- [MiniSearch](https://lucaong.github.io/minisearch/)
 - [highlight.js](https://highlightjs.org)
 ```
-
----
-
-**LICENSE:**
-```
-MIT License
-
-Copyright (c) 2024 [Your Name]
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.

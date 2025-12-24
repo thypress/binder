@@ -5,7 +5,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-#!/usr/bin/env bun
+// #!/usr/bin/env bun
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';

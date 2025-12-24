@@ -566,7 +566,7 @@ Bun.serve({
         if (pageMatch) {
           const page = parseInt(pageMatch[1], 10);
           try {
-            const html = renderPostsList(postsCache, page, templatesCache, navigation);
+            const html = renderPostsList(postsCache, page, templatesCache, navigation, siteConfig);
             return new Response(html, {
               headers: { 'Content-Type': 'text/html; charset=utf-8' },
             });
@@ -581,7 +581,7 @@ Bun.serve({
         let page = parseInt(url.searchParams.get('page'), 10) || 1;
 
         try {
-          const html = renderPostsList(postsCache, page, templatesCache, navigation);
+          const html = renderPostsList(postsCache, page, templatesCache, navigation, siteConfig);
           return new Response(html, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           });
@@ -600,7 +600,7 @@ Bun.serve({
         }
 
         try {
-          const html = renderPost(post, slug, templatesCache, navigation);
+          const html = renderPost(post, slug, templatesCache, navigation, siteConfig);
           return new Response(html, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           });
