@@ -137,3 +137,16 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+
+# THYPRESS SECTION
+bun.lockb
+.DS_Store
+src/embedded-templates.js
+thypress
+thypress-*
+config.json
+
+# THYPRESS cache and build
+.cache/
+build/
