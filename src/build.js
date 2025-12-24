@@ -113,6 +113,7 @@ async function optimizeImagesFromAssets() {
     await Promise.all(batch.map(async (image) => {
       const imagePath = path.join(imagesDir, image);
       try {
+        // Assets images use default sizing (dimensions will be read automatically)
         await optimizeImage(imagePath, outputDir);
         optimized++;
         process.stdout.write(`  ${optimized}/${images.length}\r`);
@@ -208,7 +209,8 @@ async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgr
       fs.mkdirSync(outputDir, { recursive: true });
 
       try {
-        await optimizeImage(img.resolvedPath, outputDir);
+        // Pass the actual sizes to generate (if available)
+        await optimizeImage(img.resolvedPath, outputDir, img.sizesToGenerate);
         optimized++;
         if (showProgress) {
           const percentage = Math.floor((optimized / needsUpdate.length) * 100);
@@ -281,14 +283,14 @@ function cleanupOrphanedImages(imageReferences, cacheDir) {
   return removed;
 }
 
-function buildPosts(postsCache, templates, navigation) {
+function buildPosts(postsCache, templates, navigation, siteConfig) {
   let count = 0;
 
   for (const [slug, post] of postsCache) {
     const postDir = path.join(BUILD_DIR, 'post', slug);
     fs.mkdirSync(postDir, { recursive: true });
 
-    const html = renderPost(post, slug, templates, navigation);
+    const html = renderPost(post, slug, templates, navigation, siteConfig);
     fs.writeFileSync(path.join(postDir, 'index.html'), html);
     count++;
   }
@@ -296,10 +298,10 @@ function buildPosts(postsCache, templates, navigation) {
   console.log(`✓ Generated ${count} post pages`);
 }
 
-function buildIndexPages(postsCache, templates, navigation) {
+function buildIndexPages(postsCache, templates, navigation, siteConfig) {
   const totalPages = getTotalPages(postsCache);
 
-  const indexHtml = renderPostsList(postsCache, 1, templates, navigation);
+  const indexHtml = renderPostsList(postsCache, 1, templates, navigation, siteConfig);
   fs.writeFileSync(path.join(BUILD_DIR, 'index.html'), indexHtml);
   console.log(`✓ Generated index.html`);
 
@@ -307,7 +309,7 @@ function buildIndexPages(postsCache, templates, navigation) {
     const pageDir = path.join(BUILD_DIR, 'page', page.toString());
     fs.mkdirSync(pageDir, { recursive: true });
 
-    const pageHtml = renderPostsList(postsCache, page, templates, navigation);
+    const pageHtml = renderPostsList(postsCache, page, templates, navigation, siteConfig);
     fs.writeFileSync(path.join(pageDir, 'index.html'), pageHtml);
   }
 
@@ -382,8 +384,8 @@ export async function build() {
   const postsImagesCount = await optimizeImagesFromPosts(imageReferences, BUILD_DIR, true);
   const totalImages = assetsImagesCount + postsImagesCount;
 
-  buildPosts(postsCache, templates, navigation);
-  buildIndexPages(postsCache, templates, navigation);
+  buildPosts(postsCache, templates, navigation, siteConfig);
+  buildIndexPages(postsCache, templates, navigation, siteConfig);
   buildTagPages(postsCache, templates, navigation);
   await buildRSSAndSitemap(postsCache, siteConfig);
   buildSearchIndex(postsCache);

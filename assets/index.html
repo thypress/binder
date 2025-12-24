@@ -1,9 +1,33 @@
+<!-- SPDX-License-Identifier: MPL-2.0
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Blog</title>
+  <meta name="description" content="{{siteDescription}}">
+
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{{siteTitle}}">
+  <meta property="og:description" content="{{siteDescription}}">
+  <meta property="og:url" content="{{siteUrl}}/">
+  <meta property="og:site_name" content="{{siteTitle}}">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{{siteTitle}}">
+  <meta name="twitter:description" content="{{siteDescription}}">
+
+  <!-- SEO -->
+  <link rel="canonical" content="{{siteUrl}}/">
+
   <link rel="stylesheet" href="/assets/style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
   <link rel="alternate" type="application/rss+xml" title="RSS Feed" href="/rss.xml">
@@ -84,9 +108,9 @@
     <p><a href="/rss.xml">RSS</a> | <a href="/sitemap.xml">Sitemap</a></p>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/minisearch@7.1.0/dist/umd/index.min.js"></script>
   <script>
-    let fuse;
+    let miniSearch;
     const searchInput = document.getElementById('search');
     const searchResults = document.getElementById('search-results');
     const postsList = document.getElementById('posts-list');
@@ -94,10 +118,17 @@
     fetch('/search.json')
       .then(r => r.json())
       .then(data => {
-        fuse = new Fuse(data, {
-          keys: ['title', 'content', 'tags', 'description'],
-          threshold: 0.3
+        miniSearch = new MiniSearch({
+          fields: ['title', 'content', 'tags', 'description'],
+          storeFields: ['title', 'slug', 'date', 'description'],
+          searchOptions: {
+            boost: { title: 2, description: 1.5 },
+            fuzzy: 0.2,
+            prefix: true
+          }
         });
+
+        miniSearch.addAll(data);
       })
       .catch(err => console.error('Search failed:', err));
 
@@ -110,24 +141,23 @@
         return;
       }
 
-      if (!fuse) {
+      if (!miniSearch) {
         searchResults.innerHTML = '<p>Loading...</p>';
         searchResults.style.display = 'block';
         return;
       }
 
-      const results = fuse.search(query);
+      const results = miniSearch.search(query);
 
       if (results.length === 0) {
         searchResults.innerHTML = '<p>No results found.</p>';
       } else {
         searchResults.innerHTML = results.slice(0, 10).map(result => {
-          const post = result.item;
           return `
             <div class="search-result">
-              <h4><a href="/post/${post.slug}/">${post.title}</a></h4>
-              <div class="meta">${post.date}</div>
-              ${post.description ? `<p>${post.description}</p>` : ''}
+              <h4><a href="/post/${result.slug}/">${result.title}</a></h4>
+              <div class="meta">${result.date}</div>
+              ${result.description ? `<p>${result.description}</p>` : ''}
             </div>
           `;
         }).join('');
