@@ -232,6 +232,49 @@ main {
   color: #999;
 }
 
+/* Post navigation (prev/next) */
+.post-nav {
+  display: flex;
+  justify-content: space-between;
+  margin: 3rem 0 2rem 0;
+  padding-top: 2rem;
+  border-top: 1px solid #eee;
+  gap: 2rem;
+}
+
+.post-nav-prev,
+.post-nav-next {
+  flex: 1;
+}
+
+.post-nav-next {
+  text-align: right;
+}
+
+.post-nav a {
+  display: block;
+  padding: 1rem;
+  background: #f9f9f9;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.post-nav a:hover {
+  background: #f1f1f1;
+  text-decoration: none;
+}
+
+@media (max-width: 768px) {
+  .post-nav {
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .post-nav-next {
+    text-align: left;
+  }
+}
+
 /* Article content */
 article img,
 article picture {

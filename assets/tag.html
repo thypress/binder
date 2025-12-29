@@ -19,22 +19,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   <aside>
     <h2>Navigation</h2>
     <nav>
-      {{#each navigation}}
-        {{#if (eq this.type "folder")}}
-          <details open>
-            <summary>{{this.title}}</summary>
-            <ul>
-              {{#each this.children}}
-                <li><a href="/post/{{this.slug}}/">{{this.title}}</a></li>
-              {{/each}}
-            </ul>
-          </details>
-        {{else}}
-          <div>
-            <a href="/post/{{this.slug}}/">{{this.title}}</a>
-          </div>
-        {{/if}}
-      {{/each}}
+      {{{navigationTree navigation}}}
     </nav>
   </aside>
   {{/if}}

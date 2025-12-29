@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import Handlebars from 'handlebars';
 import {
   loadAllPosts,
   loadTemplates,
@@ -21,8 +22,11 @@ import {
   generateSitemap,
   generateSearchIndex,
   optimizeImage,
-  getSiteConfig
+  getSiteConfig,
+  getPostsSorted
 } from './renderer.js';
+import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
+import { EMBEDDED_TEMPLATES } from './embedded-templates.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const BUILD_DIR = path.join(__dirname, '../build');
@@ -36,7 +40,7 @@ function ensureBuildDir() {
     fs.rmSync(BUILD_DIR, { recursive: true, force: true });
   }
   fs.mkdirSync(BUILD_DIR, { recursive: true });
-  console.log('✓ Build directory created');
+  console.log(success('Build directory created'));
 }
 
 function copyDirectory(src, dest) {
@@ -59,7 +63,7 @@ function copyStaticAssets() {
   const assetsDir = path.join(process.cwd(), 'assets');
 
   if (!fs.existsSync(assetsDir)) {
-    console.log('No /assets directory found, skipping static assets');
+    console.log(info('No /assets directory found, skipping static assets'));
     return;
   }
 
@@ -71,16 +75,18 @@ function copyStaticAssets() {
   for (const entry of entries) {
     if (entry === 'index.html' || entry === 'post.html' || entry === 'tag.html') continue;
     if (entry === 'img') continue;
+    if (entry === 'partials') continue; // Don't copy partials (they're compiled into templates)
+    if (entry === 'robots.txt' || entry === 'llms.txt' || entry === '404.html') continue; // These are generated
 
     const srcPath = path.join(assetsDir, entry);
     const destPath = path.join(buildAssetsDir, entry);
 
     if (fs.statSync(srcPath).isDirectory()) {
       copyDirectory(srcPath, destPath);
-      console.log(`✓ Copied directory: assets/${entry}/`);
+      console.log(success(`Copied directory: assets/${entry}/`));
     } else {
       fs.copyFileSync(srcPath, destPath);
-      console.log(`✓ Copied file: assets/${entry}`);
+      console.log(success(`Copied file: assets/${entry}`));
     }
   }
 }
@@ -102,7 +108,7 @@ async function optimizeImagesFromAssets() {
     return 0;
   }
 
-  console.log(`Optimizing ${images.length} images from /assets/img...`);
+  console.log(info(`Optimizing ${images.length} images from /assets/img...`));
 
   let optimized = 0;
 
@@ -118,12 +124,12 @@ async function optimizeImagesFromAssets() {
         optimized++;
         process.stdout.write(`  ${optimized}/${images.length}\r`);
       } catch (error) {
-        console.error(`\n  Error optimizing ${image}:`, error.message);
+        console.error(`\n${errorMsg(`Error optimizing ${image}: ${error.message}`)}`);
       }
     }));
   }
 
-  console.log(`\n✓ Optimized ${optimized} images from /assets/img`);
+  console.log(`\n${success(`Optimized ${optimized} images from /assets/img`)}`);
   return optimized;
 }
 
@@ -176,8 +182,8 @@ async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgr
   }
 
   if (showProgress) {
-    console.log(`\nScanning images...`);
-    console.log(`✓ Found ${imagesToOptimize.length} images in posts/`);
+    console.log(info(`Scanning images...`));
+    console.log(success(`Found ${imagesToOptimize.length} images in posts/`));
   }
 
   const needsUpdate = [];
@@ -189,13 +195,13 @@ async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgr
   }
 
   if (needsUpdate.length === 0 && showProgress) {
-    console.log(`✓ All images up to date (${imagesToOptimize.length} cached)`);
+    console.log(success(`All images up to date (${imagesToOptimize.length} cached)`));
     return imagesToOptimize.length;
   }
 
   if (showProgress) {
-    console.log(`Optimizing images: ${needsUpdate.length}/${imagesToOptimize.length} (${imagesToOptimize.length - needsUpdate.length} cached)`);
-    console.log(`Using ${CONCURRENCY} parallel workers`);
+    console.log(info(`Optimizing images: ${needsUpdate.length}/${imagesToOptimize.length} (${imagesToOptimize.length - needsUpdate.length} cached)`));
+    console.log(dim(`Using ${CONCURRENCY} parallel workers`));
   }
 
   let optimized = 0;
@@ -218,13 +224,13 @@ async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgr
           process.stdout.write(`  ${bar} ${percentage}% (${optimized}/${needsUpdate.length})\r`);
         }
       } catch (error) {
-        console.error(`\n  Error optimizing ${img.outputPath}:`, error.message);
+        console.error(`\n${errorMsg(`Error optimizing ${img.outputPath}: ${error.message}`)}`);
       }
     }));
   }
 
   if (showProgress && needsUpdate.length > 0) {
-    console.log(`\n✓ Optimized ${optimized} images (${optimized * 6} files generated)`);
+    console.log(`\n${success(`Optimized ${optimized} images (${optimized * 6} files generated)`)}`);
   }
 
   return imagesToOptimize.length;
@@ -277,7 +283,7 @@ function cleanupOrphanedImages(imageReferences, cacheDir) {
   scanAndClean(postCacheDir);
 
   if (removed > 0) {
-    console.log(`✓ Cleaned up ${removed} orphaned cache files`);
+    console.log(success(`Cleaned up ${removed} orphaned cache files`));
   }
 
   return removed;
@@ -290,12 +296,13 @@ function buildPosts(postsCache, templates, navigation, siteConfig) {
     const postDir = path.join(BUILD_DIR, 'post', slug);
     fs.mkdirSync(postDir, { recursive: true });
 
-    const html = renderPost(post, slug, templates, navigation, siteConfig);
+    // Pass postsCache for prev/next links
+    const html = renderPost(post, slug, templates, navigation, siteConfig, postsCache);
     fs.writeFileSync(path.join(postDir, 'index.html'), html);
     count++;
   }
 
-  console.log(`✓ Generated ${count} post pages`);
+  console.log(success(`Generated ${count} post pages`));
 }
 
 function buildIndexPages(postsCache, templates, navigation, siteConfig) {
@@ -303,7 +310,7 @@ function buildIndexPages(postsCache, templates, navigation, siteConfig) {
 
   const indexHtml = renderPostsList(postsCache, 1, templates, navigation, siteConfig);
   fs.writeFileSync(path.join(BUILD_DIR, 'index.html'), indexHtml);
-  console.log(`✓ Generated index.html`);
+  console.log(success(`Generated index.html`));
 
   for (let page = 2; page <= totalPages; page++) {
     const pageDir = path.join(BUILD_DIR, 'page', page.toString());
@@ -314,7 +321,7 @@ function buildIndexPages(postsCache, templates, navigation, siteConfig) {
   }
 
   if (totalPages > 1) {
-    console.log(`✓ Generated ${totalPages - 1} pagination pages`);
+    console.log(success(`Generated ${totalPages - 1} pagination pages`));
   }
 }
 
@@ -333,46 +340,128 @@ function buildTagPages(postsCache, templates, navigation) {
     fs.writeFileSync(path.join(tagDir, 'index.html'), html);
   }
 
-  console.log(`✓ Generated ${tags.length} tag pages`);
+  console.log(success(`Generated ${tags.length} tag pages`));
 }
 
 async function buildRSSAndSitemap(postsCache, siteConfig) {
   const rss = generateRSS(postsCache, siteConfig);
   fs.writeFileSync(path.join(BUILD_DIR, 'rss.xml'), rss);
-  console.log('✓ Generated rss.xml');
+  console.log(success('Generated rss.xml'));
 
   const sitemap = await generateSitemap(postsCache, siteConfig);
   fs.writeFileSync(path.join(BUILD_DIR, 'sitemap.xml'), sitemap);
-  console.log('✓ Generated sitemap.xml');
+  console.log(success('Generated sitemap.xml'));
 }
 
 function buildSearchIndex(postsCache) {
   const searchJson = generateSearchIndex(postsCache);
   fs.writeFileSync(path.join(BUILD_DIR, 'search.json'), searchJson);
-  console.log('✓ Generated search.json');
+  console.log(success('Generated search.json'));
+}
+
+function buildRobotsTxt(siteConfig) {
+  try {
+    const robotsPath = path.join(process.cwd(), 'assets', 'robots.txt');
+    const outputPath = path.join(BUILD_DIR, 'robots.txt');
+
+    let content;
+    if (fs.existsSync(robotsPath)) {
+      // User's custom version
+      content = fs.readFileSync(robotsPath, 'utf-8');
+    } else {
+      // Use embedded default
+      content = EMBEDDED_TEMPLATES['robots.txt'] || 'User-agent: *\nAllow: /';
+    }
+
+    // Process with Handlebars
+    const template = Handlebars.compile(content);
+    const rendered = template({ siteUrl: siteConfig.url || 'https://example.com' });
+
+    fs.writeFileSync(outputPath, rendered);
+    console.log(success('Generated robots.txt'));
+  } catch (error) {
+    console.error(errorMsg(`Failed to generate robots.txt: ${error.message}`));
+  }
+}
+
+function buildLlmsTxt(postsCache, siteConfig) {
+  try {
+    const llmsPath = path.join(process.cwd(), 'assets', 'llms.txt');
+    const outputPath = path.join(BUILD_DIR, 'llms.txt');
+
+    let content;
+    if (fs.existsSync(llmsPath)) {
+      // User's custom version
+      content = fs.readFileSync(llmsPath, 'utf-8');
+    } else {
+      // Use embedded default
+      content = EMBEDDED_TEMPLATES['llms.txt'] || '# Site\n\n{{siteUrl}}/sitemap.xml';
+    }
+
+    // Prepare data
+    const recentPosts = getPostsSorted(postsCache).slice(0, 10).map(p => ({
+      title: p.title,
+      slug: p.slug
+    }));
+    const allTags = getAllTags(postsCache);
+
+    // Process with Handlebars
+    const template = Handlebars.compile(content);
+    const rendered = template({
+      siteTitle: siteConfig.title || 'My Blog',
+      siteDescription: siteConfig.description || '',
+      siteUrl: siteConfig.url || 'https://example.com',
+      recentPosts: recentPosts,
+      allTags: allTags
+    });
+
+    fs.writeFileSync(outputPath, rendered);
+    console.log(success('Generated llms.txt'));
+  } catch (error) {
+    console.error(errorMsg(`Failed to generate llms.txt: ${error.message}`));
+  }
+}
+
+function build404Page() {
+  try {
+    const custom404 = path.join(process.cwd(), 'assets', '404.html');
+    const output404 = path.join(BUILD_DIR, '404.html');
+
+    if (fs.existsSync(custom404)) {
+      // User's custom version
+      fs.copyFileSync(custom404, output404);
+    } else if (EMBEDDED_TEMPLATES['404.html']) {
+      // Use embedded default
+      fs.writeFileSync(output404, EMBEDDED_TEMPLATES['404.html']);
+    }
+
+    console.log(success('Generated 404.html'));
+  } catch (error) {
+    console.error(errorMsg(`Failed to generate 404.html: ${error.message}`));
+  }
 }
 
 export async function build() {
-  console.log('Building static site...\n');
+  console.log(bright('Building static site...\n'));
 
   const { postsCache, navigation, imageReferences, brokenImages } = loadAllPosts();
   const templates = loadTemplates();
   const siteConfig = getSiteConfig();
 
   if (postsCache.size === 0) {
-    console.log('No posts found in /posts directory');
+    console.log(warning('No posts found in /posts directory'));
     return;
   }
 
   if (!templates.has('index') || !templates.has('post')) {
-    console.log('Missing required templates (index.html or post.html)');
+    console.log(errorMsg('Missing required templates (index.html or post.html)'));
     return;
   }
 
   if (brokenImages.length > 0) {
-    console.log(`\nWarning: Broken image references detected:`);
+    console.log(warning(`\nBroken image references detected:`));
     for (const broken of brokenImages) {
-      console.log(`  • ${broken.post} → ${broken.src} (file not found)`);
+      console.log(dim(`  • ${broken.post} → ${broken.src} (file not found)`));
     }
     console.log('');
   }
@@ -389,11 +478,14 @@ export async function build() {
   buildTagPages(postsCache, templates, navigation);
   await buildRSSAndSitemap(postsCache, siteConfig);
   buildSearchIndex(postsCache);
+  buildRobotsTxt(siteConfig);
+  buildLlmsTxt(postsCache, siteConfig);
+  build404Page();
 
-  console.log(`\n✓ Build complete! Output in /build`);
-  console.log(`   ${postsCache.size} posts + ${getTotalPages(postsCache)} index pages + ${getAllTags(postsCache).length} tag pages`);
+  console.log(bright(`\n${success('Build complete!')} Output in /build`));
+  console.log(dim(`   ${postsCache.size} posts + ${getTotalPages(postsCache)} index pages + ${getAllTags(postsCache).length} tag pages`));
   if (totalImages > 0) {
-    console.log(`   ${totalImages} images optimized`);
+    console.log(dim(`   ${totalImages} images optimized`));
   }
 }
 
@@ -401,9 +493,9 @@ export async function optimizeToCache(imageReferences, brokenImages) {
   console.log('');
 
   if (brokenImages.length > 0) {
-    console.log(`Warning: Broken image references detected:`);
+    console.log(warning(`Broken image references detected:`));
     for (const broken of brokenImages) {
-      console.log(`  • ${broken.post} → ${broken.src} (file not found)`);
+      console.log(dim(`  • ${broken.post} → ${broken.src} (file not found)`));
     }
     console.log('');
   }

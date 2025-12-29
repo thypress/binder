@@ -7,11 +7,19 @@
 
 // #!/usr/bin/env bun
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
+import zlib from 'zlib';
+import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 import { EMBEDDED_TEMPLATES } from './embedded-templates.js';
+import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
+
+const gzip = promisify(zlib.gzip);
+const brotliCompress = promisify(zlib.brotliCompress);
 
 // Import version from package.json
 const packageJson = JSON.parse(
@@ -30,69 +38,58 @@ function parseArgs() {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
-    // Check for help
     if (arg === 'help' || arg === '--help' || arg === '-h') {
       command = 'help';
       break;
     }
 
-    // Check for version
     if (arg === 'version' || arg === '--version' || arg === '-v') {
       command = 'version';
       break;
     }
 
-    // Check for clean command
     if (arg === 'clean') {
       command = 'clean';
       continue;
     }
 
-    // Check for build command
     if (arg === 'build' || arg === 'b') {
       command = 'build';
       continue;
     }
 
-    // Check for serve command
     if (arg === 'serve' || arg === 'dev' || arg === 's') {
       command = 'serve';
       continue;
     }
 
-    // Check for --serve flag (for build --serve)
     if (arg === '--serve') {
       serveAfterBuild = true;
       continue;
     }
 
-    // Check for no-browser flag
     if (arg === '--no-browser' || arg === '--no-open') {
       openBrowser = false;
       continue;
     }
 
-    // Check for posts directory flags
     if (arg === '--posts' || arg === '--posts-dir' || arg === '-p') {
       postsDir = args[i + 1];
       i++;
       continue;
     }
 
-    // Check if it's a path (directory)
     if (fs.existsSync(arg) && fs.statSync(arg).isDirectory()) {
       postsDir = arg;
       continue;
     }
 
-    // Check if it looks like a path (contains / or \)
     if (arg.includes('/') || arg.includes('\\')) {
       postsDir = arg;
       continue;
     }
   }
 
-  // Resolve posts directory
   if (postsDir) {
     postsDir = path.resolve(postsDir);
   } else {
@@ -104,56 +101,81 @@ function parseArgs() {
 
 const { command, postsDir, openBrowser, serveAfterBuild } = parseArgs();
 
-// Set the working directory context based on posts location
 const workingDir = path.dirname(postsDir);
 const postsFolder = path.basename(postsDir);
 
-function ensureDefaults() {
-  // Create posts directory if it doesn't exist
-  if (!fs.existsSync(postsDir)) {
-    fs.mkdirSync(postsDir, { recursive: true });
-    console.log(`✓ Created ${postsDir}`);
+function checkTemplatesStaleness() {
+  const templatesDir = path.join(__dirname, '../templates');
+  const embeddedFile = path.join(__dirname, 'embedded-templates.js');
+
+  if (!fs.existsSync(templatesDir) || !fs.existsSync(embeddedFile)) return;
+
+  const files = fs.readdirSync(templatesDir);
+  let newestMtime = 0;
+  for (const file of files) {
+    const filePath = path.join(templatesDir, file);
+    if (fs.statSync(filePath).isFile()) {
+      const mtime = fs.statSync(filePath).mtime.getTime();
+      if (mtime > newestMtime) newestMtime = mtime;
+    }
   }
 
-  // Create assets directory in the same location as posts
+  const embeddedMtime = fs.statSync(embeddedFile).mtime.getTime();
+
+  if (newestMtime > embeddedMtime) {
+    console.log(warning('Templates modified since last embed'));
+    console.log(dim('Run: bun src/embed-templates.js'));
+    console.log('');
+  }
+}
+
+function ensureDefaults() {
+  if (!fs.existsSync(postsDir)) {
+    fs.mkdirSync(postsDir, { recursive: true });
+    console.log(success(`Created ${postsDir}`));
+  }
+
   const assetsDir = path.join(workingDir, 'assets');
   if (!fs.existsSync(assetsDir)) {
     fs.mkdirSync(assetsDir, { recursive: true });
   }
 
-  // Create config if missing
   const configPath = path.join(workingDir, 'config.json');
   if (!fs.existsSync(configPath)) {
     fs.writeFileSync(configPath, JSON.stringify({
       title: "My Blog",
-      description: "A blog powered by thypress",
+      description: "A blog powered by THYPRESS",
       url: "https://example.com",
       author: "Anonymous"
     }, null, 2));
-    console.log(`✓ Created ${configPath}`);
+    console.log(success(`Created ${configPath}`));
   }
 
-  // Create templates from embedded data
   const templates = [
     { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
     { name: 'post.html', content: EMBEDDED_TEMPLATES['post.html'] },
     { name: 'tag.html', content: EMBEDDED_TEMPLATES['tag.html'] },
-    { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] }
+    { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] },
+    { name: 'robots.txt', content: EMBEDDED_TEMPLATES['robots.txt'] },
+    { name: 'llms.txt', content: EMBEDDED_TEMPLATES['llms.txt'] },
+    { name: '404.html', content: EMBEDDED_TEMPLATES['404.html'] }
   ];
 
   let created = false;
   templates.forEach(({ name, content }) => {
     const dest = path.join(assetsDir, name);
     if (!fs.existsSync(dest)) {
-      fs.writeFileSync(dest, content);
-      console.log(`✓ Created ${dest}`);
-      created = true;
+      if (content && typeof content === 'string') {
+        fs.writeFileSync(dest, content);
+        console.log(success(`Created ${dest}`));
+        created = true;
+      } else {
+        console.log(warning(`Skipping ${name} - not in embedded templates`));
+      }
     }
   });
 
   if (created) console.log('');
-
-  // Ensure .gitignore exists and contains .cache/ and build/
   ensureGitignore();
 }
 
@@ -193,7 +215,7 @@ function ensureGitignore() {
         : '# THYPRESS cache and build\n' + newLines.join('\n') + '\n';
 
       fs.writeFileSync(gitignorePath, updatedContent);
-      console.log(`✓ Updated .gitignore (added ${newLines.join(', ')})`);
+      console.log(success(`Updated .gitignore`));
     }
   }
 }
@@ -204,13 +226,14 @@ function createExamplePost() {
     if (mdFiles.length === 0) {
       const examplePost = path.join(postsDir, '2024-01-01-welcome.md');
       fs.writeFileSync(examplePost, `---
-title: Welcome to thypress!
-date: 2024-01-01
+title: Welcome to THYPRESS!
+createdAt: 2024-01-01
+updatedAt: 2024-01-15
 tags: [blogging, markdown]
-description: Your first post with thypress
+description: Your first post with THYPRESS
 ---
 
-# Welcome to thypress!
+# Welcome to THYPRESS!
 
 This is your first post. Create more \`.md\` files in \`${postsFolder}/\`.
 
@@ -221,7 +244,8 @@ Add YAML front matter to your posts:
 \`\`\`yaml
 ---
 title: My Post Title
-date: 2024-01-01
+createdAt: 2024-01-01
+updatedAt: 2024-01-15
 tags: [tag1, tag2]
 description: A short description
 ---
@@ -231,54 +255,40 @@ description: A short description
 
 - Write in Markdown
 - Organize with tags
-- Folder-based navigation for docs
-- Client-side search with MiniSearch
-- Auto-generated RSS feed
-- Auto-generated sitemap
+- Folder-based navigation
+- Client-side search (MiniSearch)
+- Auto-generated RSS & sitemap
 - Image optimization (WebP + responsive)
 - Syntax highlighting
 - Blazing fast hot reload
-
-## Code Example
-
-\`\`\`javascript
-function greet(name) {
-  console.log(\`Hello, \${name}!\`);
-}
-
-greet('World');
-\`\`\`
+- HTTP caching + compression
 
 Happy blogging!
 `);
-      console.log(`✓ Created example post at ${examplePost}\n`);
+      console.log(success(`Created example post\n`));
     }
   }
 }
 
 async function serve() {
-  console.log(`Using posts directory: ${postsDir}\n`);
+  console.log(info(`Using posts directory: ${postsDir}\n`));
+  checkTemplatesStaleness();
   ensureDefaults();
   createExamplePost();
 
-  // Set environment variable for renderer
-  process.env.thypress_POSTS_DIR = postsDir;
-  process.env.thypress_OPEN_BROWSER = openBrowser ? 'true' : 'false';
-
-  // Change to working directory before starting server
+  process.env.THYPRESS_POSTS_DIR = postsDir;
+  process.env.THYPRESS_OPEN_BROWSER = openBrowser ? 'true' : 'false';
   process.chdir(workingDir);
 
   await import('./server.js');
 }
 
 async function build() {
-  console.log(`Using posts directory: ${postsDir}\n`);
+  console.log(info(`Using posts directory: ${postsDir}\n`));
+  checkTemplatesStaleness();
   ensureDefaults();
 
-  // Set environment variable for renderer
-  process.env.thypress_POSTS_DIR = postsDir;
-
-  // Change to working directory before building
+  process.env.THYPRESS_POSTS_DIR = postsDir;
   process.chdir(workingDir);
 
   const module = await import('./build.js');
@@ -286,39 +296,63 @@ async function build() {
 }
 
 async function buildAndServe() {
-  console.log(`Using posts directory: ${postsDir}\n`);
+  console.log(info(`Using posts directory: ${postsDir}\n`));
+  checkTemplatesStaleness();
   ensureDefaults();
 
-  process.env.thypress_POSTS_DIR = postsDir;
+  process.env.THYPRESS_POSTS_DIR = postsDir;
   process.chdir(workingDir);
 
-  // First build
   const buildModule = await import('./build.js');
   await buildModule.build();
 
   console.log('\n' + '='.repeat(50));
-  console.log('Starting preview server for /build...\n');
+  console.log(bright('Starting preview server for /build...\n'));
 
-  // Then serve the build directory
   const buildDir = path.join(workingDir, 'build');
 
   if (!fs.existsSync(buildDir)) {
-    console.error('Error: /build directory not found. Build may have failed.');
+    console.error(errorMsg('Error: /build not found'));
     process.exit(1);
   }
 
-  // Simple static file server for build directory
+  // OPTIMIZED BUILD PREVIEW SERVER
   const START_PORT = 3009;
   const MAX_PORT_TRIES = 100;
+
+  // In-memory cache for build preview
+  const buildCache = new Map();
+  const MAX_BUILD_CACHE_SIZE = 50 * 1024 * 1024; // 50MB
+  let currentBuildCacheSize = 0;
+
+  function getMimeType(filePath) {
+    const ext = filePath.split('.').pop().toLowerCase();
+    const types = {
+      'html': 'text/html; charset=utf-8',
+      'css': 'text/css',
+      'js': 'text/javascript',
+      'json': 'application/json',
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'gif': 'image/gif',
+      'webp': 'image/webp',
+      'svg': 'image/svg+xml',
+      'xml': 'application/xml; charset=utf-8'
+    };
+    return types[ext] || 'application/octet-stream';
+  }
+
+  function generateETag(content) {
+    return `"${crypto.createHash('md5').update(content).digest('hex')}"`;
+  }
 
   async function findAvailablePort(startPort) {
     for (let port = startPort; port < startPort + MAX_PORT_TRIES; port++) {
       try {
         const testServer = Bun.serve({
           port,
-          fetch() {
-            return new Response('test');
-          }
+          fetch() { return new Response('test'); }
         });
         testServer.stop();
         return port;
@@ -326,27 +360,27 @@ async function buildAndServe() {
         continue;
       }
     }
-    throw new Error(`Could not find available port`);
+    throw new Error('No available port');
   }
 
   const port = await findAvailablePort(START_PORT);
 
   if (port !== START_PORT) {
-    console.log(`ℹ️  Port ${START_PORT} in use, using ${port} instead\n`);
+    console.log(info(`Using port ${port}\n`));
   }
 
   Bun.serve({
     port,
-    fetch(request) {
+    async fetch(request) {
       const url = new URL(request.url);
       let filePath = path.join(buildDir, url.pathname);
 
-      // Serve index.html for directory requests
+      // Directory → index.html
       if (url.pathname.endsWith('/')) {
         filePath = path.join(filePath, 'index.html');
       }
 
-      // If no extension, try adding index.html
+      // No extension → try index.html
       if (!path.extname(filePath)) {
         const indexPath = path.join(filePath, 'index.html');
         if (fs.existsSync(indexPath)) {
@@ -354,33 +388,129 @@ async function buildAndServe() {
         }
       }
 
-      try {
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          const content = fs.readFileSync(filePath);
-          const ext = path.extname(filePath).substring(1);
+      const cacheKey = filePath;
 
-          const mimeTypes = {
-            'html': 'text/html',
-            'css': 'text/css',
-            'js': 'text/javascript',
-            'json': 'application/json',
-            'png': 'image/png',
-            'jpg': 'image/jpeg',
-            'jpeg': 'image/jpeg',
-            'gif': 'image/gif',
-            'webp': 'image/webp',
-            'svg': 'image/svg+xml',
-            'xml': 'application/xml'
+      try {
+        // Check cache
+        if (buildCache.has(cacheKey)) {
+          const cached = buildCache.get(cacheKey);
+          const ifNoneMatch = request.headers.get('if-none-match');
+
+          if (ifNoneMatch === cached.etag) {
+            return new Response(null, {
+              status: 304,
+              headers: {
+                'ETag': cached.etag,
+                'Cache-Control': cached.cacheControl
+              }
+            });
+          }
+
+          const acceptEncoding = request.headers.get('accept-encoding') || '';
+          let content = cached.raw;
+          let encoding = null;
+
+          if (acceptEncoding.includes('br') && cached.brotli) {
+            content = cached.brotli;
+            encoding = 'br';
+          } else if (acceptEncoding.includes('gzip') && cached.gzip) {
+            content = cached.gzip;
+            encoding = 'gzip';
+          }
+
+          const headers = {
+            'Content-Type': cached.mimeType,
+            'ETag': cached.etag,
+            'Cache-Control': cached.cacheControl
           };
 
-          return new Response(content, {
-            headers: {
-              'Content-Type': mimeTypes[ext] || 'application/octet-stream'
+          if (encoding) headers['Content-Encoding'] = encoding;
+
+          return new Response(content, { headers });
+        }
+
+        // Load from disk
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          const content = await fsPromises.readFile(filePath);
+          const mimeType = getMimeType(filePath);
+          const etag = generateETag(content);
+
+          const cacheControl = mimeType.includes('image') || mimeType.includes('font')
+            ? 'public, max-age=31536000, immutable'
+            : mimeType.includes('css') || mimeType.includes('javascript')
+            ? 'public, max-age=86400, immutable'
+            : 'public, max-age=3600';
+
+          // Pre-compress text-based files
+          let gzipData = null;
+          let brotliData = null;
+
+          if (content.length > 1024 && (
+            mimeType.includes('text') ||
+            mimeType.includes('html') ||
+            mimeType.includes('javascript') ||
+            mimeType.includes('json') ||
+            mimeType.includes('xml') ||
+            mimeType.includes('css')
+          )) {
+            [gzipData, brotliData] = await Promise.all([
+              gzip(content, { level: 6 }),
+              brotliCompress(content, {
+                params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 }
+              })
+            ]);
+          }
+
+          // Cache it
+          if (content.length < 10 * 1024 * 1024) {
+            buildCache.set(cacheKey, {
+              raw: content,
+              mimeType,
+              etag,
+              cacheControl,
+              gzip: gzipData,
+              brotli: brotliData
+            });
+
+            currentBuildCacheSize += content.length;
+            if (gzipData) currentBuildCacheSize += gzipData.length;
+            if (brotliData) currentBuildCacheSize += brotliData.length;
+
+            // Simple LRU eviction
+            while (currentBuildCacheSize > MAX_BUILD_CACHE_SIZE) {
+              const firstKey = buildCache.keys().next().value;
+              const firstItem = buildCache.get(firstKey);
+              currentBuildCacheSize -= firstItem.raw.length;
+              if (firstItem.gzip) currentBuildCacheSize -= firstItem.gzip.length;
+              if (firstItem.brotli) currentBuildCacheSize -= firstItem.brotli.length;
+              buildCache.delete(firstKey);
             }
-          });
+          }
+
+          const acceptEncoding = request.headers.get('accept-encoding') || '';
+          let finalContent = content;
+          let encoding = null;
+
+          if (acceptEncoding.includes('br') && brotliData) {
+            finalContent = brotliData;
+            encoding = 'br';
+          } else if (acceptEncoding.includes('gzip') && gzipData) {
+            finalContent = gzipData;
+            encoding = 'gzip';
+          }
+
+          const headers = {
+            'Content-Type': mimeType,
+            'ETag': etag,
+            'Cache-Control': cacheControl
+          };
+
+          if (encoding) headers['Content-Encoding'] = encoding;
+
+          return new Response(finalContent, { headers });
         }
       } catch (error) {
-        console.error(`Error serving ${filePath}:`, error.message);
+        console.error(errorMsg(`Error serving ${filePath}: ${error.message}`));
       }
 
       return new Response('Not Found', { status: 404 });
@@ -388,9 +518,9 @@ async function buildAndServe() {
   });
 
   const serverUrl = `http://localhost:${port}`;
-  console.log(`✓ Preview server running at ${serverUrl}`);
-  console.log(`  Serving static files from /build`);
-  console.log(`  Press Ctrl+C to stop\n`);
+  console.log(success(`Preview server: ${serverUrl}`));
+  console.log(dim(`  Optimized with caching + compression`));
+  console.log(dim(`  Press Ctrl+C to stop\n`));
 
   if (openBrowser) {
     const { exec } = await import('child_process');
@@ -405,84 +535,62 @@ function clean() {
 
   if (fs.existsSync(cacheDir)) {
     fs.rmSync(cacheDir, { recursive: true, force: true });
-    console.log(`✓ Cleaned .cache directory`);
+    console.log(success(`Cleaned .cache`));
   } else {
-    console.log('No .cache directory found');
+    console.log(info('No .cache found'));
   }
 }
 
 function showVersion() {
-  console.log(`thypress v${VERSION}`);
+  console.log(`THYPRESS v${VERSION}`);
 }
 
 function help() {
   console.log(`
-thypress v${VERSION} - Simple markdown blog/docs engine
+${bright('THYPRESS')} v${VERSION} - Simple markdown blog/docs engine
 
-Usage:
-  thypress [command] [options]
+${bright('Usage:')}
+  THYPRESS [command] [options]
 
-Commands:
+${bright('Commands:')}
   serve, s, dev           Start server with hot reload (default)
   build, b                Build static site to /build
-  build --serve           Build static site and preview it
-  clean                   Delete .cache directory
-  version, -v, --version  Show version
-  help, --help, -h        Show this help
+  build --serve           Build + preview with optimized server
+  clean                   Delete .cache
+  version, -v             Show version
+  help, -h                Show help
 
-Options:
-  --posts, -p <path>      Specify posts directory
+${bright('Options:')}
+  --posts, -p <path>      Posts directory
   --no-browser            Don't auto-open browser
-  <path>                  Directly specify posts directory
+  <path>                  Direct posts path
 
-Examples:
-  thypress                           # Serve from ./posts
-  thypress serve                     # Same as above
-  thypress --no-browser              # Serve without opening browser
-  thypress build                     # Build static site
-  thypress build --serve             # Build and preview
-  thypress clean                     # Clear image cache
+${bright('Examples:')}
+  THYPRESS                           # Serve from ./posts
+  THYPRESS build                     # Build static site
+  THYPRESS build --serve             # Build + preview
+  THYPRESS --posts ~/blog/posts      # Custom posts dir
 
-  thypress /path/to/posts            # Use specific posts folder
-  thypress --posts /path/to/posts    # Same, with explicit flag
-  thypress -p ~/my-blog/posts        # Short flag version
+${bright('Performance Features:')}
+  ✓ HTTP caching (ETag + Cache-Control)
+  ✓ Compression (Brotli + gzip)
+  ✓ Pre-compressed cache variants
+  ✓ Request deduplication
+  ✓ Priority-based LRU cache
+  ✓ Async I/O throughout
 
-  thypress build --posts ~/blog/posts    # Build from specific location
-
-  # Drag & drop:
-  # Just drag your posts folder onto the thypress binary!
-
-Features:
-  • Front matter support (title, date, tags, description)
-  • Folder-based navigation (for docs)
-  • Images alongside posts (auto-optimized)
-  • Tag pages
-  • Client-side search (MiniSearch)
-  • RSS feed (/rss.xml)
-  • Sitemap (/sitemap.xml)
-  • Image optimization (WebP + responsive)
-  • Syntax highlighting
-  • Hot reload in serve mode
-  • Pagination
-
-Image Optimization:
-  • Put images next to your markdown files
-  • Serve mode: Images cached in .cache/ (gitignored)
-  • Build mode: Optimized to build/post/
-  • Auto-cleanup of orphaned images
-
-Documentation:
-  https://github.com/thypress/thypress
-
-That's it!
+${bright('Docs:')}
+  https://github.com/THYPRESS/THYPRESS
 `);
 }
 
 switch (command) {
   case 'serve':
+    checkTemplatesStaleness();
     serve();
     break;
   case 'build':
+    checkTemplatesStaleness();
     if (serveAfterBuild) {
       buildAndServe();
     } else {
@@ -499,7 +607,7 @@ switch (command) {
     help();
     break;
   default:
-    console.log(`Unknown command: ${command}`);
-    console.log('Run \`thypress help\` for usage.\n');
+    console.log(errorMsg(`Unknown command: ${command}`));
+    console.log(dim('Run `THYPRESS help` for usage.\n'));
     process.exit(1);
 }
