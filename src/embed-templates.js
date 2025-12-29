@@ -18,7 +18,10 @@ const templates = {
   'index.html': fs.readFileSync(path.join(templatesDir, 'default-index.html'), 'utf-8'),
   'post.html': fs.readFileSync(path.join(templatesDir, 'default-post.html'), 'utf-8'),
   'tag.html': fs.readFileSync(path.join(templatesDir, 'default-tag.html'), 'utf-8'),
-  'style.css': fs.readFileSync(path.join(templatesDir, 'default-style.css'), 'utf-8')
+  'style.css': fs.readFileSync(path.join(templatesDir, 'default-style.css'), 'utf-8'),
+  'robots.txt': fs.readFileSync(path.join(templatesDir, 'default-robots.txt'), 'utf-8'),
+  'llms.txt': fs.readFileSync(path.join(templatesDir, 'default-llms.txt'), 'utf-8'),
+  '404.html': fs.readFileSync(path.join(templatesDir, 'default-404.html'), 'utf-8')
 };
 
 const output = `// AUTO-GENERATED - DO NOT EDIT
@@ -28,4 +31,4 @@ export const EMBEDDED_TEMPLATES = ${JSON.stringify(templates, null, 2)};
 `;
 
 fs.writeFileSync(outputFile, output);
-console.log('✓ Embedded templates generated at src/embedded-templates.js');
+console.log('Embedded templates generated at src/embedded-templates.js');

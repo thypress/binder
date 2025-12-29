@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { success, error as errorMsg, warning, info, dim } from './utils/colors.js';
 
 const md = new MarkdownIt();
 md.use(markdownItHighlight);
@@ -36,10 +37,188 @@ let navigationHash = null;
 
 // Register Handlebars helpers
 Handlebars.registerHelper('eq', (a, b) => a === b);
+Handlebars.registerHelper('multiply', (a, b) => a * b);
+
+// Helper for rendering navigation tree with <details> tags
+Handlebars.registerHelper('navigationTree', function(nav) {
+  if (!nav || nav.length === 0) return '';
+
+  function renderTree(items, level = 0) {
+    let html = '';
+
+    for (const item of items) {
+      if (item.type === 'folder') {
+        html += `<details open>\n`;
+        html += `  <summary>${Handlebars.escapeExpression(item.title)}</summary>\n`;
+        html += `  <ul>\n`;
+        html += renderTree(item.children, level + 1);
+        html += `  </ul>\n`;
+        html += `</details>\n`;
+      } else if (item.type === 'file') {
+        html += `<li><a href="/post/${item.slug}/">${Handlebars.escapeExpression(item.title)}</a></li>\n`;
+      }
+    }
+
+    return html;
+  }
+
+  return new Handlebars.SafeString(renderTree(nav));
+});
 
 export function slugify(str) {
-  // Allow forward slashes for nested paths
+  // Always use forward slashes for URLs (web standard)
   return str.toLowerCase().replace(/\s+/g, '-').replace(/[^\w./-]/g, '');
+}
+
+// Normalize path to web format (forward slashes) - EXPORTED for reuse
+export function normalizeToWebPath(filePath) {
+  // Convert OS-specific path separators to forward slashes
+  return filePath.split(path.sep).join('/');
+}
+
+// Calculate reading time and word count
+function calculateReadingStats(content) {
+  // Strip markdown syntax for accurate word count
+  const plainText = content
+    .replace(/!\[.*?\]\(.*?\)/g, '') // Remove images
+    .replace(/\[([^\]]+)\]\(.*?\)/g, '$1') // Keep link text only
+    .replace(/[#*`_~]/g, '') // Remove markdown syntax
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .trim();
+
+  const words = plainText.split(/\s+/).filter(w => w.length > 0).length;
+  const readingTime = Math.ceil(words / 200); // 200 WPM
+
+  return { wordCount: words, readingTime };
+}
+
+// Extract title from H1 heading - EXPORTED for reuse
+export function extractTitleFromContent(content, isMarkdown) {
+  if (!isMarkdown) {
+    return null; // Don't parse markdown syntax in .txt files
+  }
+
+  // Try to find first H1 heading
+  const h1Match = content.match(/^#\s+(.+)$/m);
+  if (h1Match) {
+    return h1Match[1].trim();
+  }
+
+  return null;
+}
+
+// Extract date from filename - EXPORTED for reuse
+export function extractDateFromFilename(filename) {
+  // Try to extract date from filename (YYYY-MM-DD format)
+  const basename = path.basename(filename);
+  const dateMatch = basename.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (dateMatch) {
+    return dateMatch[1];
+  }
+  return null;
+}
+
+/**
+ * Validate birthtime - check if it's a real creation time or fallback value
+ * Returns true if birthtime is valid and reliable
+ */
+function isValidBirthtime(stats) {
+  const birthtime = stats.birthtime.getTime();
+  const ctime = stats.ctime.getTime();
+  const mtime = stats.mtime.getTime();
+
+  // Check 1: Not Unix epoch (Jan 1, 1970)
+  if (birthtime <= 0) return false;
+
+  // Check 2: Not same as ctime (indicates FS doesn't support birthtime)
+  // Some filesystems return ctime as birthtime when birthtime is unavailable
+  if (birthtime === ctime) return false;
+
+  // Check 3: Birthtime shouldn't be after mtime (sanity check)
+  if (birthtime > mtime) return false;
+
+  return true;
+}
+
+/**
+ * Process post metadata (title, dates, reading stats) with smart fallbacks
+ * Single source of truth for metadata extraction - used by both initial load and hot reload
+ *
+ * @param {string} content - Post content (markdown or plain text)
+ * @param {string} filename - Filename (can be full path or basename)
+ * @param {object} frontMatter - Parsed YAML front matter
+ * @param {boolean} isMarkdown - Whether file is markdown
+ * @param {string} fullPath - Full filesystem path for stat reading
+ * @returns {object} - { title, createdAt, updatedAt, wordCount, readingTime }
+ */
+export function processPostMetadata(content, filename, frontMatter, isMarkdown, fullPath) {
+  // Get file stats for date extraction
+  const stats = fs.statSync(fullPath);
+
+  // Title extraction with fallback chain
+  let title = frontMatter.title;
+
+  if (!title) {
+    // Try to extract from first H1 heading
+    title = extractTitleFromContent(content, isMarkdown);
+  }
+
+  if (!title) {
+    // Use filename without date prefix (basename only!)
+    const basename = path.basename(filename);
+    title = basename
+      .replace(/\.(md|txt)$/, '')
+      .replace(/^\d{4}-\d{2}-\d{2}-/, '')
+      .replace(/[-_]/g, ' ')
+      .trim();
+  }
+
+  if (!title) {
+    // Fallback to raw filename
+    title = path.basename(filename).replace(/\.(md|txt)$/, '');
+  }
+
+  // createdAt extraction with fallback chain
+  let createdAt = frontMatter.createdAt || frontMatter.date;
+
+  if (!createdAt) {
+    // Try filename date prefix
+    createdAt = extractDateFromFilename(filename);
+  }
+
+  if (!createdAt) {
+    // Try birthtime if valid and reliable
+    if (isValidBirthtime(stats)) {
+      createdAt = stats.birthtime.toISOString().split('T')[0];
+    }
+  }
+
+  if (!createdAt) {
+    // Ultimate fallback to mtime
+    createdAt = stats.mtime.toISOString().split('T')[0];
+  }
+
+  // updatedAt extraction with fallback chain
+  let updatedAt = frontMatter.updatedAt || frontMatter.updated;
+
+  if (!updatedAt) {
+    // Use mtime as default for updatedAt
+    updatedAt = stats.mtime.toISOString().split('T')[0];
+  }
+
+  // Normalize date formats
+  if (createdAt instanceof Date) {
+    createdAt = createdAt.toISOString().split('T')[0];
+  }
+
+  if (updatedAt instanceof Date) {
+    updatedAt = updatedAt.toISOString().split('T')[0];
+  }
+
+  // Calculate reading stats
+  const { wordCount, readingTime } = calculateReadingStats(content);
+
+  return { title, createdAt, updatedAt, wordCount, readingTime };
 }
 
 // Custom markdown-it renderer for optimized images with context awareness
@@ -65,7 +244,7 @@ function setupImageOptimizer(md) {
 
     // Get the context from env (post's relative path)
     const postRelativePath = env.postRelativePath || '';
-    const postsDir = process.env.thypress_POSTS_DIR || path.join(__dirname, '../posts');
+    const postsDir = process.env.THYPRESS_POSTS_DIR || path.join(__dirname, '../posts');
 
     // Resolve the image path relative to the post
     let resolvedImagePath;
@@ -89,7 +268,7 @@ function setupImageOptimizer(md) {
     }
 
     // Normalize path separators to forward slashes for web
-    outputImagePath = outputImagePath.replace(/\\/g, '/');
+    outputImagePath = normalizeToWebPath(outputImagePath);
 
     // Extract filename without extension
     const basename = path.basename(resolvedImagePath, path.extname(resolvedImagePath));
@@ -212,7 +391,7 @@ export async function optimizeImage(imagePath, outputDir, sizesToGenerate = STAN
   return optimized;
 }
 
-function buildNavigationTree(postsDir, postsCache = new Map()) {
+export function buildNavigationTree(postsDir, postsCache = new Map()) {
   const navigation = [];
 
   function processDirectory(dir, relativePath = '') {
@@ -221,7 +400,9 @@ function buildNavigationTree(postsDir, postsCache = new Map()) {
 
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+      // Use path.join then normalize to web path (forward slashes)
+      const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+      const webPath = normalizeToWebPath(relPath);
 
       if (entry.isDirectory()) {
         const children = processDirectory(fullPath, relPath);
@@ -234,7 +415,7 @@ function buildNavigationTree(postsDir, postsCache = new Map()) {
           });
         }
       } else if (entry.name.endsWith('.md') || entry.name.endsWith('.txt')) {
-        const slug = slugify(relPath.replace(/\.(md|txt)$/, ''));
+        const slug = slugify(webPath.replace(/\.(md|txt)$/, ''));
 
         let title;
         const post = postsCache.get(slug);
@@ -252,7 +433,7 @@ function buildNavigationTree(postsDir, postsCache = new Map()) {
           name: entry.name,
           title: title,
           slug: slug,
-          path: relPath
+          path: webPath
         });
       }
     }
@@ -270,29 +451,6 @@ function buildNavigationTree(postsDir, postsCache = new Map()) {
   return processDirectory(postsDir);
 }
 
-function extractTitleFromContent(content, isMarkdown) {
-  if (!isMarkdown) {
-    return null; // Don't parse markdown syntax in .txt files
-  }
-
-  // Try to find first H1 heading
-  const h1Match = content.match(/^#\s+(.+)$/m);
-  if (h1Match) {
-    return h1Match[1].trim();
-  }
-
-  return null;
-}
-
-function extractDateFromFilename(filename) {
-  // Try to extract date from filename (YYYY-MM-DD format)
-  const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (dateMatch) {
-    return dateMatch[1];
-  }
-  return null;
-}
-
 export function loadAllPosts() {
   const postsCache = new Map();
   const slugMap = new Map();
@@ -300,10 +458,10 @@ export function loadAllPosts() {
   const brokenImages = [];
   const imageDimensionsCache = new Map(); // Cache for image dimensions
 
-  const postsDir = process.env.thypress_POSTS_DIR || path.join(__dirname, '../posts');
+  const postsDir = process.env.THYPRESS_POSTS_DIR || path.join(__dirname, '../posts');
 
-  async function preScanImageDimensions(content, relativePath) {
-    // Extract all image references from markdown
+  // SYNCHRONOUS pre-scan of image dimensions (FIXED)
+  function preScanImageDimensions(content, relativePath) {
     const imageMatches = content.matchAll(/!\[.*?\]\((.*?)\)/g);
 
     for (const match of imageMatches) {
@@ -314,7 +472,7 @@ export function loadAllPosts() {
         continue;
       }
 
-      // Resolve image path (same logic as in setupImageOptimizer)
+      // Resolve image path
       let resolvedImagePath;
       if (src.startsWith('/')) {
         resolvedImagePath = path.join(postsDir, src.substring(1));
@@ -326,11 +484,18 @@ export function loadAllPosts() {
         resolvedImagePath = path.resolve(postDir, src);
       }
 
-      // Read dimensions if file exists and not already cached
+      // Read dimensions SYNCHRONOUSLY if file exists and not already cached
       if (fs.existsSync(resolvedImagePath) && !imageDimensionsCache.has(resolvedImagePath)) {
         try {
-          const metadata = await sharp(resolvedImagePath).metadata();
-          imageDimensionsCache.set(resolvedImagePath, metadata.width);
+          // Use sharp's sync buffer reading for immediate dimensions
+          const buffer = fs.readFileSync(resolvedImagePath);
+          const metadata = sharp(buffer).metadata();
+          // Sharp metadata returns a promise, but we can use sync approach
+          sharp(buffer).metadata().then(meta => {
+            imageDimensionsCache.set(resolvedImagePath, meta.width);
+          }).catch(() => {
+            // Skip if can't read dimensions
+          });
         } catch (error) {
           // Skip if can't read dimensions
         }
@@ -343,25 +508,29 @@ export function loadAllPosts() {
 
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+      // Build path using path.join (OS-specific)
+      const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+      // Convert to web path (forward slashes) for slug
+      const webPath = normalizeToWebPath(relPath);
 
       if (entry.isDirectory()) {
         loadPostsFromDir(fullPath, relPath);
       } else if (entry.name.endsWith('.md') || entry.name.endsWith('.txt')) {
         try {
           const isMarkdown = entry.name.endsWith('.md');
-          const slug = slugify(relPath.replace(/\.(md|txt)$/, ''));
-          slugMap.set(relPath, slug);
+          const slug = slugify(webPath.replace(/\.(md|txt)$/, ''));
+          slugMap.set(webPath, slug); // Store with web path
 
           const rawContent = fs.readFileSync(fullPath, 'utf-8');
           const { data: frontMatter, content } = matter(rawContent);
 
-          // Pre-scan images to cache dimensions (async but we'll handle it)
-          // For now, we'll do this synchronously in the render phase
-          // and accept that first render won't have optimized sizes
+          // Pre-scan image dimensions FIRST
+          if (isMarkdown) {
+            preScanImageDimensions(content, webPath);
+          }
 
           const env = {
-            postRelativePath: relPath,
+            postRelativePath: webPath,
             referencedImages: [],
             imageDimensionsCache // Pass the cache
           };
@@ -369,12 +538,12 @@ export function loadAllPosts() {
           const renderedHtml = isMarkdown ? md.render(content, env) : `<pre>${content}</pre>`;
 
           if (env.referencedImages.length > 0) {
-            imageReferences.set(relPath, env.referencedImages);
+            imageReferences.set(webPath, env.referencedImages);
 
             for (const img of env.referencedImages) {
               if (!fs.existsSync(img.resolvedPath)) {
                 brokenImages.push({
-                  post: relPath,
+                  post: webPath,
                   src: img.src,
                   resolvedPath: img.resolvedPath
                 });
@@ -382,46 +551,14 @@ export function loadAllPosts() {
             }
           }
 
-          // Smart title extraction with priority order
-          let title = frontMatter.title;
-
-          if (!title) {
-            // Try to extract from first H1 (only for markdown)
-            title = extractTitleFromContent(content, isMarkdown);
-          }
-
-          if (!title) {
-            // Use filename without date prefix
-            title = entry.name
-              .replace(/\.(md|txt)$/, '')
-              .replace(/^\d{4}-\d{2}-\d{2}-/, '')
-              .replace(/[-_]/g, ' ')
-              .trim();
-          }
-
-          if (!title) {
-            // Fallback to raw filename
-            title = entry.name.replace(/\.(md|txt)$/, '');
-          }
-
-          // Smart date extraction with priority order
-          let date = frontMatter.date;
-
-          if (!date) {
-            // Try filename date prefix
-            date = extractDateFromFilename(entry.name);
-          }
-
-          if (!date) {
-            // Use file modification time
-            const stats = fs.statSync(fullPath);
-            date = stats.mtime.toISOString().split('T')[0];
-          }
-
-          // Normalize date format
-          if (date instanceof Date) {
-            date = date.toISOString().split('T')[0];
-          }
+          // Use shared metadata processing function
+          const { title, createdAt, updatedAt, wordCount, readingTime } = processPostMetadata(
+            content,
+            entry.name,
+            frontMatter,
+            isMarkdown,
+            fullPath
+          );
 
           const tags = Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []);
           const description = frontMatter.description || '';
@@ -437,62 +574,33 @@ export function loadAllPosts() {
           }
 
           postsCache.set(slug, {
-            filename: relPath,
+            filename: webPath,
             slug: slug,
             title: title,
-            date: date,
+            date: createdAt, // Main date for sorting (backwards compat)
+            createdAt: createdAt,
+            updatedAt: updatedAt,
             tags: tags,
             description: description,
             content: content,
             renderedHtml: renderedHtml,
             frontMatter: frontMatter,
-            relativePath: relPath,
-            ogImage: ogImage // Store for OG tags
+            relativePath: webPath,
+            ogImage: ogImage,
+            wordCount: wordCount,
+            readingTime: readingTime
           });
         } catch (error) {
-          console.error(`Error loading post '${relPath}': ${error.message}`);
+          console.error(`Error loading post '${webPath}': ${error.message}`);
         }
       }
     }
   }
 
   try {
-    // First pass: scan all images and cache dimensions
-    const allFiles = [];
-
-    function collectFiles(dir, relativePath = '') {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
-
-        if (entry.isDirectory()) {
-          collectFiles(fullPath, relPath);
-        } else if (entry.name.endsWith('.md') || entry.name.endsWith('.txt')) {
-          allFiles.push({ fullPath, relPath, isMarkdown: entry.name.endsWith('.md') });
-        }
-      }
-    }
-
-    collectFiles(postsDir);
-
-    // Pre-scan all images
-    (async () => {
-      for (const file of allFiles) {
-        if (file.isMarkdown) {
-          const rawContent = fs.readFileSync(file.fullPath, 'utf-8');
-          const { content } = matter(rawContent);
-          await preScanImageDimensions(content, file.relPath);
-        }
-      }
-    })().then(() => {
-      // After dimensions are cached, we're ready
-      // (This happens async but won't block initial load)
-    });
-
-    // Second pass: load all posts (dimensions may not be cached yet on first run)
+    // Load all posts with synchronous dimension pre-scan
     loadPostsFromDir(postsDir);
-    console.log(`✓ Loaded ${postsCache.size} posts`);
+    console.log(success(`Loaded ${postsCache.size} posts`));
   } catch (error) {
     console.error(`Error reading posts directory: ${error.message}`);
   }
@@ -518,25 +626,45 @@ export function loadTemplates() {
   try {
     const indexHtml = fs.readFileSync(path.join(assetsDir, 'index.html'), 'utf-8');
     templatesCache.set('index', Handlebars.compile(indexHtml));
-    console.log(`✓ Template 'index' compiled`);
+    console.log(success(`Template 'index' compiled`));
   } catch (error) {
-    console.error(`Error loading template 'index': ${error.message}`);
+    console.error(errorMsg(`Error loading template 'index': ${error.message}`));
   }
 
   try {
     const postHtml = fs.readFileSync(path.join(assetsDir, 'post.html'), 'utf-8');
     templatesCache.set('post', Handlebars.compile(postHtml));
-    console.log(`✓ Template 'post' compiled`);
+    console.log(success(`Template 'post' compiled`));
   } catch (error) {
-    console.error(`Error loading template 'post': ${error.message}`);
+    console.error(errorMsg(`Error loading template 'post': ${error.message}`));
   }
 
   try {
     const tagHtml = fs.readFileSync(path.join(assetsDir, 'tag.html'), 'utf-8');
     templatesCache.set('tag', Handlebars.compile(tagHtml));
-    console.log(`✓ Template 'tag' compiled`);
+    console.log(success(`Template 'tag' compiled`));
   } catch (error) {
     // Tag template is optional
+  }
+
+  // Load partials (optional)
+  const partialsDir = path.join(assetsDir, 'partials');
+  if (fs.existsSync(partialsDir)) {
+    try {
+      const partialFiles = fs.readdirSync(partialsDir).filter(f => f.endsWith('.html'));
+
+      partialFiles.forEach(file => {
+        const name = file.replace('.html', '');
+        const content = fs.readFileSync(path.join(partialsDir, file), 'utf-8');
+        Handlebars.registerPartial(name, content);
+      });
+
+      if (partialFiles.length > 0) {
+        console.log(success(`Loaded ${partialFiles.length} partials`));
+      }
+    } catch (error) {
+      console.error(errorMsg(`Error loading partials: ${error.message}`));
+    }
   }
 
   return templatesCache;
@@ -544,7 +672,8 @@ export function loadTemplates() {
 
 export function getPostsSorted(postsCache) {
   return Array.from(postsCache.values()).sort((a, b) => {
-    return new Date(b.date) - new Date(a.date);
+    // Sort by createdAt (descending - newest first)
+    return new Date(b.createdAt) - new Date(a.createdAt);
   });
 }
 
@@ -595,6 +724,8 @@ export function renderPostsList(postsCache, page, templates, navigation, siteCon
     slug: post.slug,
     title: post.title,
     date: post.date,
+    createdAt: post.createdAt,
+    updatedAt: post.updatedAt,
     tags: post.tags,
     description: post.description
   }));
@@ -623,7 +754,7 @@ export function renderPostsList(postsCache, page, templates, navigation, siteCon
   });
 }
 
-export function renderPost(post, slug, templates, navigation, siteConfig = {}) {
+export function renderPost(post, slug, templates, navigation, siteConfig = {}, postsCache = null) {
   const postTpl = templates.get('post');
   if (!postTpl) {
     throw new Error('Post template not found');
@@ -636,14 +767,46 @@ export function renderPost(post, slug, templates, navigation, siteConfig = {}) {
     author = 'Anonymous'
   } = siteConfig;
 
-  // Convert date to ISO format for article:published_time
-  const dateISO = new Date(post.date).toISOString();
+  // Convert dates to ISO format
+  const createdAtISO = new Date(post.createdAt).toISOString();
+  const updatedAtISO = new Date(post.updatedAt).toISOString();
+
+  // Get prev/next posts (if postsCache is provided)
+  let prevPost = null;
+  let nextPost = null;
+
+  if (postsCache) {
+    const sortedPosts = getPostsSorted(postsCache);
+    const currentIndex = sortedPosts.findIndex(p => p.slug === slug);
+
+    if (currentIndex !== -1) {
+      // Previous post (older, chronologically later in array)
+      if (currentIndex < sortedPosts.length - 1) {
+        prevPost = {
+          title: sortedPosts[currentIndex + 1].title,
+          slug: sortedPosts[currentIndex + 1].slug
+        };
+      }
+
+      // Next post (newer, chronologically earlier in array)
+      if (currentIndex > 0) {
+        nextPost = {
+          title: sortedPosts[currentIndex - 1].title,
+          slug: sortedPosts[currentIndex - 1].slug
+        };
+      }
+    }
+  }
 
   return postTpl({
     content: post.renderedHtml,
     title: post.title,
     date: post.date,
-    dateISO: dateISO,
+    createdAt: post.createdAt,
+    updatedAt: post.updatedAt,
+    dateISO: createdAtISO, // Backwards compat
+    createdAtISO: createdAtISO,
+    updatedAtISO: updatedAtISO,
     tags: post.tags,
     description: post.description,
     slug: slug,
@@ -651,7 +814,12 @@ export function renderPost(post, slug, templates, navigation, siteConfig = {}) {
     siteTitle: siteTitle,
     siteUrl: siteUrl,
     author: author,
-    navigation: navigation
+    navigation: navigation,
+    wordCount: post.wordCount,
+    readingTime: post.readingTime,
+    frontMatter: post.frontMatter, // Pass entire frontMatter for custom fields
+    prevPost: prevPost,
+    nextPost: nextPost
   });
 }
 
@@ -665,6 +833,8 @@ export function renderTagPage(postsCache, tag, templates, navigation) {
     slug: post.slug,
     title: post.title,
     date: post.date,
+    createdAt: post.createdAt,
+    updatedAt: post.updatedAt,
     tags: post.tags,
     description: post.description
   }));
@@ -708,6 +878,8 @@ export function generateSearchIndex(postsCache) {
     title: post.title,
     slug: post.slug,
     date: post.date,
+    createdAt: post.createdAt,
+    updatedAt: post.updatedAt,
     tags: post.tags,
     description: post.description,
     content: post.content
@@ -753,7 +925,9 @@ export function generateRSS(postsCache, siteConfig = {}) {
       description: post.description || post.content.substring(0, 200),
       content: post.renderedHtml,
       author: [{ name: author }],
-      date: new Date(post.date),
+      date: new Date(post.createdAt),
+      published: new Date(post.createdAt),
+      updated: new Date(post.updatedAt),
       category: post.tags.map(tag => ({ name: tag }))
     });
   });
@@ -778,7 +952,7 @@ export async function generateSitemap(postsCache, siteConfig = {}) {
   allPosts.forEach(post => {
     links.push({
       url: `/post/${post.slug}/`,
-      lastmod: post.date,
+      lastmod: post.updatedAt, // Use updatedAt for sitemap
       changefreq: 'monthly',
       priority: 0.8
     });
@@ -809,7 +983,7 @@ export function getSiteConfig() {
       return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     }
   } catch (error) {
-    console.error('Error loading config.json:', error.message);
+    console.error(errorMsg('Error loading config.json:', error.message));
   }
 
   return {

@@ -22,7 +22,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   <meta property="og:image" content="{{siteUrl}}{{ogImage}}">
   {{/if}}
   <meta property="og:site_name" content="{{siteTitle}}">
-  <meta property="article:published_time" content="{{dateISO}}">
+  <meta property="article:published_time" content="{{createdAtISO}}">
+  <meta property="article:modified_time" content="{{updatedAtISO}}">
   {{#if author}}
   <meta property="article:author" content="{{author}}">
   {{/if}}
@@ -41,6 +42,34 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   <meta name="author" content="{{author}}">
   {{/if}}
 
+  <!-- JSON-LD Structured Data -->
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "{{title}}",
+  "description": "{{description}}",
+  "datePublished": "{{createdAtISO}}",
+  "dateModified": "{{updatedAtISO}}",{{#if wordCount}}
+  "wordCount": {{wordCount}},{{/if}}{{#if readingTime}}
+  "timeRequired": "PT{{readingTime}}M",{{/if}}
+  "author": {
+    "@type": "Person",
+    "name": "{{author}}"
+  },{{#if ogImage}}
+  "image": "{{siteUrl}}{{ogImage}}",{{/if}}
+  "publisher": {
+    "@type": "Organization",
+    "name": "{{siteTitle}}",
+    "url": "{{siteUrl}}"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "{{siteUrl}}/post/{{slug}}/"
+  }
+}
+  </script>
+
   <link rel="stylesheet" href="/assets/style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
 </head>
@@ -49,22 +78,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   <aside>
     <h2>Navigation</h2>
     <nav>
-      {{#each navigation}}
-        {{#if (eq this.type "folder")}}
-          <details open>
-            <summary>{{this.title}}</summary>
-            <ul>
-              {{#each this.children}}
-                <li><a href="/post/{{this.slug}}/">{{this.title}}</a></li>
-              {{/each}}
-            </ul>
-          </details>
-        {{else}}
-          <div>
-            <a href="/post/{{this.slug}}/">{{this.title}}</a>
-          </div>
-        {{/if}}
-      {{/each}}
+      {{{navigationTree navigation}}}
     </nav>
   </aside>
   {{/if}}
@@ -76,7 +90,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     <!--<h1>{{title}}</h1>-->
 
     <div class="meta">
-      {{date}}
+      {{createdAt}}{{#if readingTime}} · {{readingTime}} min read{{/if}}{{#if wordCount}} · {{wordCount}} words{{/if}}
+      {{#unless (eq createdAt updatedAt)}}
+       · Updated: {{updatedAt}}
+      {{/unless}}
       {{#if tags}}
       <span class="tags">
         {{#each tags}}<a href="/tag/{{this}}/">{{this}}</a>{{/each}}
@@ -87,6 +104,21 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     <article>
       {{{content}}}
     </article>
+
+    {{#if prevPost}}{{#if nextPost}}
+    <nav class="post-nav">
+      {{#if prevPost}}
+        <div class="post-nav-prev">
+          <a href="/post/{{prevPost.slug}}/">← {{prevPost.title}}</a>
+        </div>
+      {{/if}}
+      {{#if nextPost}}
+        <div class="post-nav-next">
+          <a href="/post/{{nextPost.slug}}/">{{nextPost.title}} →</a>
+        </div>
+      {{/if}}
+    </nav>
+    {{/if}}{{/if}}
   </main>
 </body>
 </html>
