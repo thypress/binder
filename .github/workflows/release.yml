@@ -1,117 +1,90 @@
-name: Build and Release
+name: Release Binaries
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version tag (e.g., v1.0.0)'
-        required: true
-        type: string
   push:
     tags:
-      - 'v*'
+      - 'v*'  # Trigger on version tags (e.g., v0.2.0)
 
 jobs:
   build:
-    name: Build ${{ matrix.os }}
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
+          # Linux x64
           - os: ubuntu-latest
             target: linux-x64
-            artifact: thypress-linux-x64
-          - os: ubuntu-latest
-            target: linux-arm64
-            artifact: thypress-linux-arm64
-          - os: macos-latest
+            ext: ''
+
+          # macOS Intel
+          - os: macos-13
             target: macos-x64
-            artifact: thypress-macos-x64
-          - os: macos-latest
+            ext: ''
+
+          # macOS Apple Silicon
+          - os: macos-14
             target: macos-arm64
-            artifact: thypress-macos-arm64
+            ext: ''
+
+          # Windows x64
           - os: windows-latest
             target: windows-x64
-            artifact: thypress-windows-x64.exe
+            ext: '.exe'
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v1
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
         with:
           bun-version: latest
 
       - name: Install dependencies
         run: bun install
 
-      - name: Build executable (x64/arm64)
-        run: bun build ./src/cli.js --compile --target=bun-${{ matrix.target }} --outfile ${{ matrix.artifact }}
-        if: matrix.target != 'windows-x64'
+      - name: Embed templates
+        run: bun src/embed-templates.js
 
-      - name: Build executable (Windows)
-        run: bun build ./src/cli.js --compile --target=bun-windows-x64 --outfile ${{ matrix.artifact }}
-        if: matrix.target == 'windows-x64'
+      - name: Build binary
+        run: |
+          bun build ./src/cli.js --compile --outfile thypress-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: thypress-${{ matrix.target }}
+          path: thypress-${{ matrix.target }}${{ matrix.ext }}
 
   release:
+    name: Create Release
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./artifacts
-          merge-multiple: true
+          path: artifacts
+
+      - name: Display structure
+        run: ls -R artifacts/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ inputs.version || github.ref_name }}
-          name: thypress ${{ inputs.version || github.ref_name }}
           files: |
-            ./artifacts/thypress-linux-x64
-            ./artifacts/thypress-linux-arm64
-            ./artifacts/thypress-macos-x64
-            ./artifacts/thypress-macos-arm64
-            ./artifacts/thypress-windows-x64.exe
-          body: |
-            ## thypress ${{ inputs.version || github.ref_name }}
-
-            Dead simple markdown blog/docs engine. One binary, zero config.
-
-            ### Features
-            - ✓ Single binary installation
-            - ✓ Folder-based navigation for docs
-            - ✓ Client-side search (MiniSearch)
-            - ✓ Image optimization (WebP + responsive)
-            - ✓ Syntax highlighting
-            - ✓ RSS feed & Sitemap
-            - ✓ Hot reload
-
-            ### Installation
-
-            **One-liner (Linux/macOS):**
-            ```bash
-            curl -fsSL [https://raw.githubusercontent.com/$](https://raw.githubusercontent.com/$){{ github.repository }}/main/install.sh | bash
-            ```
-
-            **npm:**
-            ```bash
-            npm install -g thypress
-            ```
-
-            ### Quick Start
-            ```bash
-            thypress            # Start dev server
-            thypress build      # Build static site
-            ```
+            artifacts/thypress-linux-x64/thypress-linux-x64
+            artifacts/thypress-macos-x64/thypress-macos-x64
+            artifacts/thypress-macos-arm64/thypress-macos-arm64
+            artifacts/thypress-windows-x64/thypress-windows-x64.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { parseDocument } from 'htmlparser2';
 import { success, error as errorMsg, warning, info, dim } from './utils/colors.js';
 
 const md = new MarkdownIt();
@@ -61,6 +62,168 @@ Handlebars.registerHelper('navigationTree', function(nav) {
 
   return new Handlebars.SafeString(renderTree(nav));
 });
+
+/**
+ * Detect if HTML content is a complete document vs a fragment
+ */
+function isCompleteHtmlDocument(htmlContent) {
+  try {
+    const dom = parseDocument(htmlContent);
+
+    return dom.children.some(node => {
+      if (node.type === 'directive' && node.name === '!doctype') {
+        return true;
+      }
+
+      if (node.type === 'tag') {
+        const structuralTags = ['html', 'head', 'body'];
+        return structuralTags.includes(node.name.toLowerCase());
+      }
+
+      return false;
+    });
+  } catch {
+    const cleaned = htmlContent.trim()
+      .replace(/^<\?xml[^>]*>\s*/i, '')
+      .replace(/^<!--[\s\S]*?-->\s*/g, '');
+
+    return /^<!DOCTYPE\s+html/i.test(cleaned) ||
+           /<(html|head|body)[\s>]/i.test(cleaned);
+  }
+}
+
+/**
+ * Determine how to handle HTML file: raw vs templated
+ */
+function detectHtmlIntent(htmlContent, frontMatter) {
+  if (frontMatter.template === 'none' || frontMatter.template === false) {
+    return { mode: 'raw' };
+  }
+
+  if (frontMatter.template) {
+    return { mode: 'templated' };
+  }
+
+  if (isCompleteHtmlDocument(htmlContent)) {
+    return { mode: 'raw' };
+  }
+
+  return { mode: 'templated' };
+}
+
+/**
+ * Process a single content file (MD, TXT, or HTML)
+ * Returns { slug, content, imageReferences }
+ */
+export function processContentFile(fullPath, relativePath, mode, contentDir) {
+  const ext = path.extname(fullPath).toLowerCase();
+  const isMarkdown = ext === '.md';
+  const isText = ext === '.txt';
+  const isHtml = ext === '.html';
+
+  const webPath = normalizeToWebPath(relativePath);
+  const url = generateUrl(webPath, mode);
+  const slug = url.substring(1).replace(/\/$/, '') || 'index';
+
+  if (isHtml) {
+    const rawHtml = fs.readFileSync(fullPath, 'utf-8');
+    const { data: frontMatter, content: htmlContent } = matter(rawHtml);
+    const intent = detectHtmlIntent(htmlContent, frontMatter);
+
+    let section = null;
+    if (mode === 'structured') {
+      section = webPath.split('/')[0];
+    } else if (mode === 'legacy') {
+      section = 'posts';
+    }
+
+    return {
+      slug,
+      content: {
+        filename: webPath,
+        slug: slug,
+        url: url,
+        title: frontMatter.title || path.basename(fullPath, '.html'),
+        date: fs.statSync(fullPath).mtime.toISOString().split('T')[0],
+        createdAt: frontMatter.createdAt || fs.statSync(fullPath).mtime.toISOString().split('T')[0],
+        updatedAt: frontMatter.updatedAt || fs.statSync(fullPath).mtime.toISOString().split('T')[0],
+        tags: Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []),
+        description: frontMatter.description || '',
+        content: htmlContent,
+        renderedHtml: intent.mode === 'raw' ? htmlContent : null,
+        frontMatter: frontMatter,
+        relativePath: webPath,
+        ogImage: frontMatter.image || null,
+        type: 'html',
+        wordCount: 0,
+        readingTime: 0,
+        section: section
+      },
+      imageReferences: []
+    };
+  }
+
+  const rawContent = fs.readFileSync(fullPath, 'utf-8');
+  const { data: frontMatter, content } = matter(rawContent);
+
+  const env = {
+    postRelativePath: webPath,
+    referencedImages: [],
+    contentDir: contentDir
+  };
+
+  const renderedHtml = isMarkdown ? md.render(content, env) : `<pre>${content}</pre>`;
+
+  const { title, createdAt, updatedAt, wordCount, readingTime } = processPostMetadata(
+    content,
+    path.basename(fullPath),
+    frontMatter,
+    isMarkdown,
+    fullPath
+  );
+
+  const tags = Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []);
+  const description = frontMatter.description || '';
+
+  let section = null;
+  if (mode === 'structured') {
+    section = webPath.split('/')[0];
+  } else if (mode === 'legacy') {
+    section = 'posts';
+  }
+
+  let ogImage = frontMatter.image || null;
+  if (!ogImage && env.referencedImages.length > 0) {
+    const firstImg = env.referencedImages[0];
+    const ogSize = firstImg.sizesToGenerate[Math.floor(firstImg.sizesToGenerate.length / 2)] || 800;
+    ogImage = `/${firstImg.urlBase}${firstImg.basename}-${ogSize}-${firstImg.hash}.jpg`;
+  }
+
+  return {
+    slug,
+    content: {
+      filename: webPath,
+      slug: slug,
+      url: url,
+      title: title,
+      date: createdAt,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      tags: tags,
+      description: description,
+      content: content,
+      renderedHtml: renderedHtml,
+      frontMatter: frontMatter,
+      relativePath: webPath,
+      ogImage: ogImage,
+      wordCount: wordCount,
+      readingTime: readingTime,
+      section: section,
+      type: isMarkdown ? 'markdown' : 'text'
+    },
+    imageReferences: env.referencedImages
+  };
+}
 
 export function slugify(str) {
   return str.toLowerCase().replace(/\s+/g, '-').replace(/[^\w./-]/g, '');
@@ -318,7 +481,6 @@ export async function optimizeImage(imagePath, outputDir, sizesToGenerate = STAN
  * Detect content structure and operational mode
  */
 export function detectContentStructure(workingDir) {
-  // 1. Check for new structure (primary)
   const contentDir = path.join(workingDir, 'content');
   if (fs.existsSync(contentDir) && fs.statSync(contentDir).isDirectory()) {
     return {
@@ -327,7 +489,6 @@ export function detectContentStructure(workingDir) {
     };
   }
 
-  // 2. Check for old structure (backwards compat)
   const postsDir = path.join(workingDir, 'posts');
   if (fs.existsSync(postsDir) && fs.statSync(postsDir).isDirectory()) {
     return {
@@ -336,7 +497,6 @@ export function detectContentStructure(workingDir) {
     };
   }
 
-  // 3. No structure - check if workingDir has content files (MAGIC MODE)
   try {
     const files = fs.readdirSync(workingDir);
     const contentFiles = files.filter(f => {
@@ -351,11 +511,8 @@ export function detectContentStructure(workingDir) {
         mode: 'simple'
       };
     }
-  } catch (error) {
-    // Directory not readable or doesn't exist
-  }
+  } catch (error) {}
 
-  // 4. Empty - will create defaults
   return {
     contentRoot: contentDir,
     mode: 'structured',
@@ -367,22 +524,14 @@ export function detectContentStructure(workingDir) {
  * Generate URL from content path based on mode
  */
 export function generateUrl(relativePath, mode, section = null) {
-  // Remove extension
   let url = relativePath.replace(/\.(md|txt|html)$/, '');
-
-  // Remove /index at end
   url = url.replace(/\/index$/, '');
 
-  // Mode-specific URL generation
   if (mode === 'structured') {
-    // content/posts/hello.md → /posts/hello/
-    // content/docs/guide.md → /docs/guide/
     return '/' + url + (url ? '/' : '');
   } else if (mode === 'legacy') {
-    // posts/hello.md → /posts/hello/
     return '/' + url + (url ? '/' : '');
   } else if (mode === 'simple') {
-    // hello.md → /hello/
     return '/' + url + (url ? '/' : '');
   }
 
@@ -400,7 +549,6 @@ export function buildNavigationTree(contentRoot, contentCache = new Map(), mode 
     const items = [];
 
     for (const entry of entries) {
-      // Skip hidden files and directories
       if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
 
       const fullPath = path.join(dir, entry.name);
@@ -420,7 +568,6 @@ export function buildNavigationTree(contentRoot, contentCache = new Map(), mode 
       } else if (/\.(md|txt|html)$/i.test(entry.name)) {
         const url = generateUrl(webPath, mode);
 
-        // Try to get title from cache
         let title;
         for (const [slug, content] of contentCache) {
           if (content.relativePath === webPath) {
@@ -485,7 +632,6 @@ export function loadAllContent() {
     return { contentCache, slugMap, navigation: [], imageReferences, brokenImages, imageDimensionsCache, mode, contentRoot };
   }
 
-  // Pre-scan image dimensions (synchronous)
   function preScanImageDimensions(content, relativePath) {
     const imageMatches = content.matchAll(/!\[.*?\]\((.*?)\)/g);
 
@@ -522,7 +668,6 @@ export function loadAllContent() {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Skip hidden/ignored files and directories
       if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
 
       const fullPath = path.join(dir, entry.name);
@@ -535,60 +680,22 @@ export function loadAllContent() {
         try {
           const ext = path.extname(entry.name).toLowerCase();
           const isMarkdown = ext === '.md';
-          const isText = ext === '.txt';
-          const isHtml = ext === '.html';
 
-          const url = generateUrl(webPath, mode);
-          const slug = url.substring(1).replace(/\/$/, '') || 'index';
-
-          slugMap.set(webPath, slug);
-
-          // HTML files are served as-is
-          if (isHtml) {
-            const htmlContent = fs.readFileSync(fullPath, 'utf-8');
-
-            contentCache.set(slug, {
-              filename: webPath,
-              slug: slug,
-              url: url,
-              title: path.basename(entry.name, '.html'),
-              date: fs.statSync(fullPath).mtime.toISOString().split('T')[0],
-              createdAt: fs.statSync(fullPath).mtime.toISOString().split('T')[0],
-              updatedAt: fs.statSync(fullPath).mtime.toISOString().split('T')[0],
-              tags: [],
-              description: '',
-              content: htmlContent,
-              renderedHtml: htmlContent,
-              frontMatter: {},
-              relativePath: webPath,
-              type: 'html',
-              wordCount: 0,
-              readingTime: 0
-            });
-            continue;
-          }
-
-          const rawContent = fs.readFileSync(fullPath, 'utf-8');
-          const { data: frontMatter, content } = matter(rawContent);
-
-          // Pre-scan image dimensions
           if (isMarkdown) {
+            const rawContent = fs.readFileSync(fullPath, 'utf-8');
+            const { content } = matter(rawContent);
             preScanImageDimensions(content, webPath);
           }
 
-          const env = {
-            postRelativePath: webPath,
-            referencedImages: [],
-            imageDimensionsCache,
-            contentDir: contentRoot
-          };
+          const result = processContentFile(fullPath, relPath, mode, contentRoot);
 
-          const renderedHtml = isMarkdown ? md.render(content, env) : `<pre>${content}</pre>`;
+          contentCache.set(result.slug, result.content);
+          slugMap.set(webPath, result.slug);
 
-          if (env.referencedImages.length > 0) {
-            imageReferences.set(webPath, env.referencedImages);
+          if (result.imageReferences.length > 0) {
+            imageReferences.set(webPath, result.imageReferences);
 
-            for (const img of env.referencedImages) {
+            for (const img of result.imageReferences) {
               if (!fs.existsSync(img.resolvedPath)) {
                 brokenImages.push({
                   post: webPath,
@@ -598,53 +705,6 @@ export function loadAllContent() {
               }
             }
           }
-
-          const { title, createdAt, updatedAt, wordCount, readingTime } = processPostMetadata(
-            content,
-            entry.name,
-            frontMatter,
-            isMarkdown,
-            fullPath
-          );
-
-          const tags = Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []);
-          const description = frontMatter.description || '';
-
-          let ogImage = frontMatter.image || null;
-          if (!ogImage && env.referencedImages.length > 0) {
-            const firstImg = env.referencedImages[0];
-            const ogSize = firstImg.sizesToGenerate[Math.floor(firstImg.sizesToGenerate.length / 2)] || 800;
-            ogImage = `/${firstImg.urlBase}${firstImg.basename}-${ogSize}-${firstImg.hash}.jpg`;
-          }
-
-          // Determine section (first-level folder in structured mode)
-          let section = null;
-          if (mode === 'structured') {
-            section = webPath.split('/')[0];
-          } else if (mode === 'legacy') {
-            section = 'posts';
-          }
-
-          contentCache.set(slug, {
-            filename: webPath,
-            slug: slug,
-            url: url,
-            title: title,
-            date: createdAt,
-            createdAt: createdAt,
-            updatedAt: updatedAt,
-            tags: tags,
-            description: description,
-            content: content,
-            renderedHtml: renderedHtml,
-            frontMatter: frontMatter,
-            relativePath: webPath,
-            ogImage: ogImage,
-            wordCount: wordCount,
-            readingTime: readingTime,
-            section: section,
-            type: isMarkdown ? 'markdown' : 'text'
-          });
         } catch (error) {
           console.error(`Error loading content '${webPath}': ${error.message}`);
         }
@@ -668,7 +728,6 @@ export function loadAllContent() {
  * Select template based on content
  */
 export function selectTemplate(content, templates, defaultTemplate = 'post') {
-  // 1. Explicit front matter override
   if (content.frontMatter && content.frontMatter.template) {
     const explicitTemplate = templates.get(content.frontMatter.template);
     if (explicitTemplate) {
@@ -676,7 +735,6 @@ export function selectTemplate(content, templates, defaultTemplate = 'post') {
     }
   }
 
-  // 2. Section-based template (first-level folder)
   if (content.section) {
     const sectionTemplate = templates.get(content.section);
     if (sectionTemplate) {
@@ -684,13 +742,11 @@ export function selectTemplate(content, templates, defaultTemplate = 'post') {
     }
   }
 
-  // 3. Type-based fallback
-  if (content.type === 'html') {
-    // HTML files don't use templates
-    return null;
+  if (content.slug === 'index' || content.slug === '') {
+    const indexTemplate = templates.get('index');
+    if (indexTemplate) return indexTemplate;
   }
 
-  // 4. Universal fallback chain: post → page → index
   return templates.get(defaultTemplate)
       || templates.get('post')
       || templates.get('page')
@@ -705,11 +761,9 @@ export async function loadTheme(themeName = null) {
   const templatesCache = new Map();
   const themeAssets = new Map();
 
-  // Determine active theme
   let activeTheme = themeName;
 
   if (!activeTheme) {
-    // Try to auto-detect
     if (fs.existsSync(templatesDir)) {
       const themes = fs.readdirSync(templatesDir)
         .filter(f => {
@@ -725,7 +779,6 @@ export async function loadTheme(themeName = null) {
     }
   }
 
-  // Load embedded defaults
   const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
 
   function compileTemplate(name, content) {
@@ -737,7 +790,6 @@ export async function loadTheme(themeName = null) {
     }
   }
 
-  // Load from embedded defaults first
   for (const [name, content] of Object.entries(EMBEDDED_TEMPLATES)) {
     if (name.endsWith('.html')) {
       const templateName = name.replace('.html', '');
@@ -748,7 +800,6 @@ export async function loadTheme(themeName = null) {
     }
   }
 
-  // Override with theme files if active theme exists
   if (activeTheme) {
     const themePath = path.join(templatesDir, activeTheme);
 
@@ -771,17 +822,13 @@ export async function loadTheme(themeName = null) {
             const ext = path.extname(entry.name).toLowerCase();
 
             if (ext === '.html') {
-              // Always compile HTML as Handlebars template
               const templateName = path.basename(entry.name, '.html');
               const compiled = compileTemplate(templateName, content);
               if (compiled) {
                 templatesCache.set(templateName, compiled);
-
-                // Also register as partial for {{> template}} usage
                 Handlebars.registerPartial(templateName, content);
               }
             } else {
-              // Check if file needs templating (contains {{ }})
               const needsTemplating = content.includes('{{') || content.includes('{%');
 
               if (needsTemplating) {
@@ -890,8 +937,7 @@ export function renderContentList(contentCache, page, templates, navigation, sit
 }
 
 export function renderContent(content, slug, templates, navigation, siteConfig = {}, contentCache = null) {
-  // HTML files are served as-is
-  if (content.type === 'html') {
+  if (content.type === 'html' && content.renderedHtml !== null) {
     return content.renderedHtml;
   }
 
@@ -934,8 +980,10 @@ export function renderContent(content, slug, templates, navigation, siteConfig =
     }
   }
 
+  const htmlToWrap = content.renderedHtml || content.content;
+
   return template({
-    content: content.renderedHtml,
+    content: htmlToWrap,
     title: content.title,
     date: content.date,
     createdAt: content.createdAt,
@@ -1047,7 +1095,7 @@ export function generateRSS(contentCache, siteConfig = {}) {
       id: `${url}${content.url}`,
       link: `${url}${content.url}`,
       description: content.description || content.content.substring(0, 200),
-      content: content.renderedHtml,
+      content: content.renderedHtml || content.content,
       author: [{ name: author }],
       date: new Date(content.createdAt),
       published: new Date(content.createdAt),

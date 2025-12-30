@@ -76,9 +76,8 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Skip hidden/ignored files and templates
       if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
-      if (entry.name.endsWith('.html')) continue; // Skip template files
+      if (entry.name.endsWith('.html')) continue;
 
       const srcPath = path.join(dir, entry.name);
       const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
@@ -89,13 +88,11 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
       } else {
         fs.mkdirSync(path.dirname(destPath), { recursive: true });
 
-        // Check if file needs templating
         const ext = path.extname(entry.name).toLowerCase();
         const content = fs.readFileSync(srcPath, 'utf-8');
         const needsTemplating = content.includes('{{') || content.includes('{%');
 
         if (needsTemplating && (ext === '.css' || ext === '.js' || ext === '.txt' || ext === '.xml')) {
-          // Render with site config
           try {
             const template = Handlebars.compile(content);
             const rendered = template({
@@ -110,11 +107,9 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
             console.log(success(`Rendered templated asset: assets/${relPath}`));
           } catch (error) {
             console.error(errorMsg(`Failed to render ${relPath}: ${error.message}`));
-            // Fall back to copying as-is
             fs.copyFileSync(srcPath, destPath);
           }
         } else {
-          // Copy static file as-is
           fs.copyFileSync(srcPath, destPath);
         }
       }
@@ -283,8 +278,7 @@ function buildContent(contentCache, templates, navigation, siteConfig, mode) {
   let count = 0;
 
   for (const [slug, content] of contentCache) {
-    // Skip HTML files (they're handled separately)
-    if (content.type === 'html') continue;
+    if (content.type === 'html' && content.renderedHtml !== null) continue;
 
     const outputPath = path.join(BUILD_DIR, content.url.substring(1), 'index.html');
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -368,7 +362,6 @@ function buildRobotsTxt(siteConfig, themeAssets) {
         content = asset.content;
       }
     } else {
-      // Fallback default
       content = `User-agent: *\nAllow: /\n\nSitemap: ${siteConfig.url || 'https://example.com'}/sitemap.xml\n`;
     }
 
@@ -405,7 +398,6 @@ function buildLlmsTxt(contentCache, siteConfig, themeAssets) {
         content = asset.content;
       }
     } else {
-      // Fallback default
       const recentContent = getContentSorted(contentCache).slice(0, 10);
       content = `# ${siteConfig.title || 'My Site'}\n\n> ${siteConfig.description || 'A site powered by THYPRESS'}\n\n## Recent Posts\n`;
 
@@ -431,7 +423,6 @@ function build404Page(themeAssets) {
       const asset = themeAssets.get('404.html');
       content404 = asset.type === 'static' ? asset.content : asset.content;
     } else {
-      // Fallback default
       content404 = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -461,7 +452,7 @@ function copyStaticHtmlFiles(contentCache) {
   let count = 0;
 
   for (const [slug, content] of contentCache) {
-    if (content.type === 'html') {
+    if (content.type === 'html' && content.renderedHtml !== null) {
       const outputPath = path.join(BUILD_DIR, content.url.substring(1), 'index.html');
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
       fs.writeFileSync(outputPath, content.renderedHtml);
@@ -491,14 +482,11 @@ function copyStaticFilesFromContent(contentRoot) {
       if (entry.isDirectory()) {
         copyStatic(srcPath, relPath);
       } else {
-        // Skip content files (.md, .txt, .html are handled separately)
         const ext = path.extname(entry.name).toLowerCase();
         if (ext === '.md' || ext === '.txt' || ext === '.html') continue;
 
-        // Skip image files (they're optimized separately)
         if (['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) continue;
 
-        // Copy other static files (PDFs, videos, audio, etc.)
         const destPath = path.join(BUILD_DIR, relPath);
         fs.mkdirSync(path.dirname(destPath), { recursive: true });
         fs.copyFileSync(srcPath, destPath);
