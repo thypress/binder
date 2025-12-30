@@ -53,7 +53,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     <ul class="posts" id="posts-list">
       {{#each posts}}
       <li>
-        <h3><a href="/post/{{slug}}/">{{title}}</a></h3>
+        <h3><a href="{{url}}">{{title}}</a></h3>
         <div class="meta">{{date}}</div>
         {{#if description}}
         <p class="description">{{description}}</p>
@@ -105,7 +105,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
       .then(data => {
         miniSearch = new MiniSearch({
           fields: ['title', 'content', 'tags', 'description'],
-          storeFields: ['title', 'slug', 'date', 'description'],
+          storeFields: ['title', 'slug', 'url', 'date', 'description'],
           searchOptions: {
             boost: { title: 2, description: 1.5 },
             fuzzy: 0.2,
@@ -140,7 +140,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
         searchResults.innerHTML = results.slice(0, 10).map(result => {
           return `
             <div class="search-result">
-              <h4><a href="/post/${result.slug}/">${result.title}</a></h4>
+              <h4><a href="${result.url}">${result.title}</a></h4>
               <div class="meta">${result.date}</div>
               ${result.description ? `<p>${result.description}</p>` : ''}
             </div>

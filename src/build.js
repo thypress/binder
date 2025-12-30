@@ -11,28 +11,25 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import Handlebars from 'handlebars';
 import {
-  loadAllPosts,
-  loadTemplates,
-  renderPostsList,
-  renderPost,
+  loadAllContent,
+  loadTheme,
+  renderContentList,
+  renderContent,
   renderTagPage,
-  getTotalPages,
   getAllTags,
   generateRSS,
   generateSitemap,
   generateSearchIndex,
   optimizeImage,
   getSiteConfig,
-  getPostsSorted
+  getContentSorted
 } from './renderer.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
-import { EMBEDDED_TEMPLATES } from './embedded-templates.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const BUILD_DIR = path.join(__dirname, '../build');
-const CACHE_DIR = path.join(__dirname, '../.cache');
+const BUILD_DIR = path.join(process.cwd(), 'build');
+const CACHE_DIR = path.join(process.cwd(), '.cache');
 
-// Determine optimal concurrency based on CPU cores
 const CONCURRENCY = Math.max(2, Math.floor(os.availableParallelism() * 0.75));
 
 function ensureBuildDir() {
@@ -59,78 +56,73 @@ function copyDirectory(src, dest) {
   }
 }
 
-function copyStaticAssets() {
-  const assetsDir = path.join(process.cwd(), 'assets');
-
-  if (!fs.existsSync(assetsDir)) {
-    console.log(info('No /assets directory found, skipping static assets'));
+function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
+  if (!activeTheme) {
+    console.log(info('No active theme, using embedded defaults'));
     return;
   }
 
+  const themePath = path.join(process.cwd(), 'templates', activeTheme);
   const buildAssetsDir = path.join(BUILD_DIR, 'assets');
+
+  if (!fs.existsSync(themePath)) {
+    console.log(warning(`Theme directory not found: ${themePath}`));
+    return;
+  }
+
   fs.mkdirSync(buildAssetsDir, { recursive: true });
 
-  const entries = fs.readdirSync(assetsDir);
+  function copyThemeFiles(dir, relativePath = '') {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-  for (const entry of entries) {
-    if (entry === 'index.html' || entry === 'post.html' || entry === 'tag.html') continue;
-    if (entry === 'img') continue;
-    if (entry === 'partials') continue; // Don't copy partials (they're compiled into templates)
-    if (entry === 'robots.txt' || entry === 'llms.txt' || entry === '404.html') continue; // These are generated
+    for (const entry of entries) {
+      // Skip hidden/ignored files and templates
+      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+      if (entry.name.endsWith('.html')) continue; // Skip template files
 
-    const srcPath = path.join(assetsDir, entry);
-    const destPath = path.join(buildAssetsDir, entry);
+      const srcPath = path.join(dir, entry.name);
+      const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+      const destPath = path.join(buildAssetsDir, relPath);
 
-    if (fs.statSync(srcPath).isDirectory()) {
-      copyDirectory(srcPath, destPath);
-      console.log(success(`Copied directory: assets/${entry}/`));
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-      console.log(success(`Copied file: assets/${entry}`));
+      if (entry.isDirectory()) {
+        copyThemeFiles(srcPath, relPath);
+      } else {
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
+
+        // Check if file needs templating
+        const ext = path.extname(entry.name).toLowerCase();
+        const content = fs.readFileSync(srcPath, 'utf-8');
+        const needsTemplating = content.includes('{{') || content.includes('{%');
+
+        if (needsTemplating && (ext === '.css' || ext === '.js' || ext === '.txt' || ext === '.xml')) {
+          // Render with site config
+          try {
+            const template = Handlebars.compile(content);
+            const rendered = template({
+              siteUrl: siteConfig.url || 'https://example.com',
+              siteTitle: siteConfig.title || 'My Site',
+              siteDescription: siteConfig.description || 'A site powered by THYPRESS',
+              author: siteConfig.author || 'Anonymous',
+              ...siteConfig,
+              theme: siteConfig.theme || {}
+            });
+            fs.writeFileSync(destPath, rendered);
+            console.log(success(`Rendered templated asset: assets/${relPath}`));
+          } catch (error) {
+            console.error(errorMsg(`Failed to render ${relPath}: ${error.message}`));
+            // Fall back to copying as-is
+            fs.copyFileSync(srcPath, destPath);
+          }
+        } else {
+          // Copy static file as-is
+          fs.copyFileSync(srcPath, destPath);
+        }
+      }
     }
   }
-}
 
-async function optimizeImagesFromAssets() {
-  const imagesDir = path.join(process.cwd(), 'assets', 'img');
-  const outputDir = path.join(BUILD_DIR, 'assets', 'img');
-
-  if (!fs.existsSync(imagesDir)) {
-    return 0;
-  }
-
-  fs.mkdirSync(outputDir, { recursive: true });
-
-  const images = fs.readdirSync(imagesDir)
-    .filter(file => /\.(jpg|jpeg|png|webp)$/i.test(file));
-
-  if (images.length === 0) {
-    return 0;
-  }
-
-  console.log(info(`Optimizing ${images.length} images from /assets/img...`));
-
-  let optimized = 0;
-
-  // Process images in batches with concurrency control
-  for (let i = 0; i < images.length; i += CONCURRENCY) {
-    const batch = images.slice(i, i + CONCURRENCY);
-
-    await Promise.all(batch.map(async (image) => {
-      const imagePath = path.join(imagesDir, image);
-      try {
-        // Assets images use default sizing (dimensions will be read automatically)
-        await optimizeImage(imagePath, outputDir);
-        optimized++;
-        process.stdout.write(`  ${optimized}/${images.length}\r`);
-      } catch (error) {
-        console.error(`\n${errorMsg(`Error optimizing ${image}: ${error.message}`)}`);
-      }
-    }));
-  }
-
-  console.log(`\n${success(`Optimized ${optimized} images from /assets/img`)}`);
-  return optimized;
+  copyThemeFiles(themePath);
+  console.log(success(`Copied theme assets from ${activeTheme}/`));
 }
 
 function needsOptimization(sourcePath, outputDir, basename, hash) {
@@ -152,20 +144,20 @@ function needsOptimization(sourcePath, outputDir, basename, hash) {
   const sourceMtime = fs.statSync(sourcePath).mtime.getTime();
 
   for (const variant of variants) {
-    const variantMtime = fs.statSync(variant).mtime.getTime();
-    if (sourceMtime > variantMtime) {
-      return true;
+    if (fs.existsSync(variant)) {
+      const variantMtime = fs.statSync(variant).mtime.getTime();
+      if (sourceMtime > variantMtime) {
+        return true;
+      }
     }
   }
 
   return false;
 }
 
-async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgress = true) {
-  const postsDir = process.env.thypress_POSTS_DIR || path.join(__dirname, '../posts');
-
+async function optimizeImagesFromContent(imageReferences, outputBaseDir, showProgress = true) {
   const uniqueImages = new Map();
-  for (const [postPath, images] of imageReferences) {
+  for (const [contentPath, images] of imageReferences) {
     for (const img of images) {
       const key = img.resolvedPath;
       if (!uniqueImages.has(key)) {
@@ -183,12 +175,12 @@ async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgr
 
   if (showProgress) {
     console.log(info(`Scanning images...`));
-    console.log(success(`Found ${imagesToOptimize.length} images in posts/`));
+    console.log(success(`Found ${imagesToOptimize.length} images in content/`));
   }
 
   const needsUpdate = [];
   for (const img of imagesToOptimize) {
-    const outputDir = path.join(outputBaseDir, 'post', path.dirname(img.outputPath));
+    const outputDir = path.join(outputBaseDir, path.dirname(img.outputPath));
     if (needsOptimization(img.resolvedPath, outputDir, img.basename, img.hash)) {
       needsUpdate.push(img);
     }
@@ -206,16 +198,14 @@ async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgr
 
   let optimized = 0;
 
-  // Process images in batches with concurrency control
   for (let i = 0; i < needsUpdate.length; i += CONCURRENCY) {
     const batch = needsUpdate.slice(i, i + CONCURRENCY);
 
     await Promise.all(batch.map(async (img) => {
-      const outputDir = path.join(outputBaseDir, 'post', path.dirname(img.outputPath));
+      const outputDir = path.join(outputBaseDir, path.dirname(img.outputPath));
       fs.mkdirSync(outputDir, { recursive: true });
 
       try {
-        // Pass the actual sizes to generate (if available)
         await optimizeImage(img.resolvedPath, outputDir, img.sizesToGenerate);
         optimized++;
         if (showProgress) {
@@ -237,14 +227,14 @@ async function optimizeImagesFromPosts(imageReferences, outputBaseDir, showProgr
 }
 
 function cleanupOrphanedImages(imageReferences, cacheDir) {
-  const postCacheDir = path.join(cacheDir, 'post');
+  const contentCacheDir = path.join(cacheDir);
 
-  if (!fs.existsSync(postCacheDir)) {
+  if (!fs.existsSync(contentCacheDir)) {
     return 0;
   }
 
   const validHashes = new Set();
-  for (const [postPath, images] of imageReferences) {
+  for (const [contentPath, images] of imageReferences) {
     for (const img of images) {
       if (fs.existsSync(img.resolvedPath)) {
         validHashes.add(img.hash);
@@ -280,7 +270,7 @@ function cleanupOrphanedImages(imageReferences, cacheDir) {
     }
   }
 
-  scanAndClean(postCacheDir);
+  scanAndClean(contentCacheDir);
 
   if (removed > 0) {
     console.log(success(`Cleaned up ${removed} orphaned cache files`));
@@ -289,26 +279,29 @@ function cleanupOrphanedImages(imageReferences, cacheDir) {
   return removed;
 }
 
-function buildPosts(postsCache, templates, navigation, siteConfig) {
+function buildContent(contentCache, templates, navigation, siteConfig, mode) {
   let count = 0;
 
-  for (const [slug, post] of postsCache) {
-    const postDir = path.join(BUILD_DIR, 'post', slug);
-    fs.mkdirSync(postDir, { recursive: true });
+  for (const [slug, content] of contentCache) {
+    // Skip HTML files (they're handled separately)
+    if (content.type === 'html') continue;
 
-    // Pass postsCache for prev/next links
-    const html = renderPost(post, slug, templates, navigation, siteConfig, postsCache);
-    fs.writeFileSync(path.join(postDir, 'index.html'), html);
+    const outputPath = path.join(BUILD_DIR, content.url.substring(1), 'index.html');
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+    const html = renderContent(content, slug, templates, navigation, siteConfig, contentCache);
+    fs.writeFileSync(outputPath, html);
     count++;
   }
 
-  console.log(success(`Generated ${count} post pages`));
+  console.log(success(`Generated ${count} content pages`));
 }
 
-function buildIndexPages(postsCache, templates, navigation, siteConfig) {
-  const totalPages = getTotalPages(postsCache);
+function buildIndexPages(contentCache, templates, navigation, siteConfig) {
+  const POSTS_PER_PAGE = 10;
+  const totalPages = Math.ceil(contentCache.size / POSTS_PER_PAGE);
 
-  const indexHtml = renderPostsList(postsCache, 1, templates, navigation, siteConfig);
+  const indexHtml = renderContentList(contentCache, 1, templates, navigation, siteConfig);
   fs.writeFileSync(path.join(BUILD_DIR, 'index.html'), indexHtml);
   console.log(success(`Generated index.html`));
 
@@ -316,7 +309,7 @@ function buildIndexPages(postsCache, templates, navigation, siteConfig) {
     const pageDir = path.join(BUILD_DIR, 'page', page.toString());
     fs.mkdirSync(pageDir, { recursive: true });
 
-    const pageHtml = renderPostsList(postsCache, page, templates, navigation, siteConfig);
+    const pageHtml = renderContentList(contentCache, page, templates, navigation, siteConfig);
     fs.writeFileSync(path.join(pageDir, 'index.html'), pageHtml);
   }
 
@@ -325,8 +318,8 @@ function buildIndexPages(postsCache, templates, navigation, siteConfig) {
   }
 }
 
-function buildTagPages(postsCache, templates, navigation) {
-  const tags = getAllTags(postsCache);
+function buildTagPages(contentCache, templates, navigation) {
+  const tags = getAllTags(contentCache);
 
   if (tags.length === 0) {
     return;
@@ -336,125 +329,205 @@ function buildTagPages(postsCache, templates, navigation) {
     const tagDir = path.join(BUILD_DIR, 'tag', tag);
     fs.mkdirSync(tagDir, { recursive: true });
 
-    const html = renderTagPage(postsCache, tag, templates, navigation);
+    const html = renderTagPage(contentCache, tag, templates, navigation);
     fs.writeFileSync(path.join(tagDir, 'index.html'), html);
   }
 
   console.log(success(`Generated ${tags.length} tag pages`));
 }
 
-async function buildRSSAndSitemap(postsCache, siteConfig) {
-  const rss = generateRSS(postsCache, siteConfig);
+async function buildRSSAndSitemap(contentCache, siteConfig) {
+  const rss = generateRSS(contentCache, siteConfig);
   fs.writeFileSync(path.join(BUILD_DIR, 'rss.xml'), rss);
   console.log(success('Generated rss.xml'));
 
-  const sitemap = await generateSitemap(postsCache, siteConfig);
+  const sitemap = await generateSitemap(contentCache, siteConfig);
   fs.writeFileSync(path.join(BUILD_DIR, 'sitemap.xml'), sitemap);
   console.log(success('Generated sitemap.xml'));
 }
 
-function buildSearchIndex(postsCache) {
-  const searchJson = generateSearchIndex(postsCache);
+function buildSearchIndex(contentCache) {
+  const searchJson = generateSearchIndex(contentCache);
   fs.writeFileSync(path.join(BUILD_DIR, 'search.json'), searchJson);
   console.log(success('Generated search.json'));
 }
 
-function buildRobotsTxt(siteConfig) {
+function buildRobotsTxt(siteConfig, themeAssets) {
   try {
-    const robotsPath = path.join(process.cwd(), 'assets', 'robots.txt');
-    const outputPath = path.join(BUILD_DIR, 'robots.txt');
-
     let content;
-    if (fs.existsSync(robotsPath)) {
-      // User's custom version
-      content = fs.readFileSync(robotsPath, 'utf-8');
+
+    if (themeAssets.has('robots.txt')) {
+      const asset = themeAssets.get('robots.txt');
+      if (asset.type === 'template') {
+        content = asset.compiled({
+          siteUrl: siteConfig.url || 'https://example.com',
+          siteTitle: siteConfig.title || 'My Site',
+          ...siteConfig
+        });
+      } else {
+        content = asset.content;
+      }
     } else {
-      // Use embedded default
-      content = EMBEDDED_TEMPLATES['robots.txt'] || 'User-agent: *\nAllow: /';
+      // Fallback default
+      content = `User-agent: *\nAllow: /\n\nSitemap: ${siteConfig.url || 'https://example.com'}/sitemap.xml\n`;
     }
 
-    // Process with Handlebars
-    const template = Handlebars.compile(content);
-    const rendered = template({ siteUrl: siteConfig.url || 'https://example.com' });
-
-    fs.writeFileSync(outputPath, rendered);
+    fs.writeFileSync(path.join(BUILD_DIR, 'robots.txt'), content);
     console.log(success('Generated robots.txt'));
   } catch (error) {
     console.error(errorMsg(`Failed to generate robots.txt: ${error.message}`));
   }
 }
 
-function buildLlmsTxt(postsCache, siteConfig) {
+function buildLlmsTxt(contentCache, siteConfig, themeAssets) {
   try {
-    const llmsPath = path.join(process.cwd(), 'assets', 'llms.txt');
-    const outputPath = path.join(BUILD_DIR, 'llms.txt');
-
     let content;
-    if (fs.existsSync(llmsPath)) {
-      // User's custom version
-      content = fs.readFileSync(llmsPath, 'utf-8');
+
+    if (themeAssets.has('llms.txt')) {
+      const asset = themeAssets.get('llms.txt');
+      if (asset.type === 'template') {
+        const recentContent = getContentSorted(contentCache).slice(0, 10).map(c => ({
+          title: c.title,
+          url: c.url,
+          slug: c.slug
+        }));
+        const allTags = getAllTags(contentCache);
+
+        content = asset.compiled({
+          siteTitle: siteConfig.title || 'My Site',
+          siteDescription: siteConfig.description || 'A site powered by THYPRESS',
+          siteUrl: siteConfig.url || 'https://example.com',
+          recentPosts: recentContent,
+          allTags: allTags,
+          ...siteConfig
+        });
+      } else {
+        content = asset.content;
+      }
     } else {
-      // Use embedded default
-      content = EMBEDDED_TEMPLATES['llms.txt'] || '# Site\n\n{{siteUrl}}/sitemap.xml';
+      // Fallback default
+      const recentContent = getContentSorted(contentCache).slice(0, 10);
+      content = `# ${siteConfig.title || 'My Site'}\n\n> ${siteConfig.description || 'A site powered by THYPRESS'}\n\n## Recent Posts\n`;
+
+      for (const item of recentContent) {
+        content += `- [${item.title}](${siteConfig.url || 'https://example.com'}${item.url})\n`;
+      }
+
+      content += `\n## Full Sitemap\n${siteConfig.url || 'https://example.com'}/sitemap.xml\n`;
     }
 
-    // Prepare data
-    const recentPosts = getPostsSorted(postsCache).slice(0, 10).map(p => ({
-      title: p.title,
-      slug: p.slug
-    }));
-    const allTags = getAllTags(postsCache);
-
-    // Process with Handlebars
-    const template = Handlebars.compile(content);
-    const rendered = template({
-      siteTitle: siteConfig.title || 'My Blog',
-      siteDescription: siteConfig.description || '',
-      siteUrl: siteConfig.url || 'https://example.com',
-      recentPosts: recentPosts,
-      allTags: allTags
-    });
-
-    fs.writeFileSync(outputPath, rendered);
+    fs.writeFileSync(path.join(BUILD_DIR, 'llms.txt'), content);
     console.log(success('Generated llms.txt'));
   } catch (error) {
     console.error(errorMsg(`Failed to generate llms.txt: ${error.message}`));
   }
 }
 
-function build404Page() {
+function build404Page(themeAssets) {
   try {
-    const custom404 = path.join(process.cwd(), 'assets', '404.html');
-    const output404 = path.join(BUILD_DIR, '404.html');
+    let content404;
 
-    if (fs.existsSync(custom404)) {
-      // User's custom version
-      fs.copyFileSync(custom404, output404);
-    } else if (EMBEDDED_TEMPLATES['404.html']) {
-      // Use embedded default
-      fs.writeFileSync(output404, EMBEDDED_TEMPLATES['404.html']);
+    if (themeAssets.has('404.html')) {
+      const asset = themeAssets.get('404.html');
+      content404 = asset.type === 'static' ? asset.content : asset.content;
+    } else {
+      // Fallback default
+      content404 = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>404 - Page Not Found</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main>
+    <h1>404 - Page Not Found</h1>
+    <p>The page you're looking for doesn't exist.</p>
+    <p><a href="/">← Back to Home</a></p>
+  </main>
+</body>
+</html>`;
     }
 
+    fs.writeFileSync(path.join(BUILD_DIR, '404.html'), content404);
     console.log(success('Generated 404.html'));
   } catch (error) {
     console.error(errorMsg(`Failed to generate 404.html: ${error.message}`));
   }
 }
 
+function copyStaticHtmlFiles(contentCache) {
+  let count = 0;
+
+  for (const [slug, content] of contentCache) {
+    if (content.type === 'html') {
+      const outputPath = path.join(BUILD_DIR, content.url.substring(1), 'index.html');
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, content.renderedHtml);
+      count++;
+    }
+  }
+
+  if (count > 0) {
+    console.log(success(`Copied ${count} static HTML files`));
+  }
+}
+
+function copyStaticFilesFromContent(contentRoot) {
+  if (!fs.existsSync(contentRoot)) return;
+
+  let count = 0;
+
+  function copyStatic(dir, relativePath = '') {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+
+      const srcPath = path.join(dir, entry.name);
+      const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+
+      if (entry.isDirectory()) {
+        copyStatic(srcPath, relPath);
+      } else {
+        // Skip content files (.md, .txt, .html are handled separately)
+        const ext = path.extname(entry.name).toLowerCase();
+        if (ext === '.md' || ext === '.txt' || ext === '.html') continue;
+
+        // Skip image files (they're optimized separately)
+        if (['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) continue;
+
+        // Copy other static files (PDFs, videos, audio, etc.)
+        const destPath = path.join(BUILD_DIR, relPath);
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
+        fs.copyFileSync(srcPath, destPath);
+        count++;
+      }
+    }
+  }
+
+  copyStatic(contentRoot);
+
+  if (count > 0) {
+    console.log(success(`Copied ${count} static files from content/`));
+  }
+}
+
 export async function build() {
   console.log(bright('Building static site...\n'));
 
-  const { postsCache, navigation, imageReferences, brokenImages } = loadAllPosts();
-  const templates = loadTemplates();
+  const { contentCache, navigation, imageReferences, brokenImages, mode, contentRoot } = loadAllContent();
   const siteConfig = getSiteConfig();
+  const { templatesCache, themeAssets, activeTheme } = await loadTheme(siteConfig.theme);
 
-  if (postsCache.size === 0) {
-    console.log(warning('No posts found in /posts directory'));
+  if (contentCache.size === 0) {
+    console.log(warning('No content found in content directory'));
     return;
   }
 
-  if (!templates.has('index') || !templates.has('post')) {
-    console.log(errorMsg('Missing required templates (index.html or post.html)'));
+  if (!templatesCache.has('index')) {
+    console.log(errorMsg('Missing required template: index.html'));
     return;
   }
 
@@ -467,25 +540,25 @@ export async function build() {
   }
 
   ensureBuildDir();
-  copyStaticAssets();
+  copyThemeAssets(themeAssets, activeTheme, siteConfig);
 
-  const assetsImagesCount = await optimizeImagesFromAssets();
-  const postsImagesCount = await optimizeImagesFromPosts(imageReferences, BUILD_DIR, true);
-  const totalImages = assetsImagesCount + postsImagesCount;
+  const imagesCount = await optimizeImagesFromContent(imageReferences, BUILD_DIR, true);
 
-  buildPosts(postsCache, templates, navigation, siteConfig);
-  buildIndexPages(postsCache, templates, navigation, siteConfig);
-  buildTagPages(postsCache, templates, navigation);
-  await buildRSSAndSitemap(postsCache, siteConfig);
-  buildSearchIndex(postsCache);
-  buildRobotsTxt(siteConfig);
-  buildLlmsTxt(postsCache, siteConfig);
-  build404Page();
+  buildContent(contentCache, templatesCache, navigation, siteConfig, mode);
+  buildIndexPages(contentCache, templatesCache, navigation, siteConfig);
+  buildTagPages(contentCache, templatesCache, navigation);
+  await buildRSSAndSitemap(contentCache, siteConfig);
+  buildSearchIndex(contentCache);
+  buildRobotsTxt(siteConfig, themeAssets);
+  buildLlmsTxt(contentCache, siteConfig, themeAssets);
+  build404Page(themeAssets);
+  copyStaticHtmlFiles(contentCache);
+  copyStaticFilesFromContent(contentRoot);
 
   console.log(bright(`\n${success('Build complete!')} Output in /build`));
-  console.log(dim(`   ${postsCache.size} posts + ${getTotalPages(postsCache)} index pages + ${getAllTags(postsCache).length} tag pages`));
-  if (totalImages > 0) {
-    console.log(dim(`   ${totalImages} images optimized`));
+  console.log(dim(`   ${contentCache.size} content files + ${getAllTags(contentCache).length} tag pages`));
+  if (imagesCount > 0) {
+    console.log(dim(`   ${imagesCount} images optimized`));
   }
 }
 
@@ -502,7 +575,7 @@ export async function optimizeToCache(imageReferences, brokenImages) {
 
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-  const count = await optimizeImagesFromPosts(imageReferences, CACHE_DIR, true);
+  const count = await optimizeImagesFromContent(imageReferences, CACHE_DIR, true);
   cleanupOrphanedImages(imageReferences, CACHE_DIR);
 
   return count;

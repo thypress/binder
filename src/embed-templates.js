@@ -11,21 +11,21 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const templatesDir = path.join(__dirname, '../templates');
+const templatesDir = path.join(__dirname, '../templates/.default');
 const outputFile = path.join(__dirname, 'embedded-templates.js');
 
 const templates = {
-  'index.html': fs.readFileSync(path.join(templatesDir, 'default-index.html'), 'utf-8'),
-  'post.html': fs.readFileSync(path.join(templatesDir, 'default-post.html'), 'utf-8'),
-  'tag.html': fs.readFileSync(path.join(templatesDir, 'default-tag.html'), 'utf-8'),
-  'style.css': fs.readFileSync(path.join(templatesDir, 'default-style.css'), 'utf-8'),
-  'robots.txt': fs.readFileSync(path.join(templatesDir, 'default-robots.txt'), 'utf-8'),
-  'llms.txt': fs.readFileSync(path.join(templatesDir, 'default-llms.txt'), 'utf-8'),
-  '404.html': fs.readFileSync(path.join(templatesDir, 'default-404.html'), 'utf-8')
+  'index.html': fs.readFileSync(path.join(templatesDir, 'index.html'), 'utf-8'),
+  'post.html': fs.readFileSync(path.join(templatesDir, 'post.html'), 'utf-8'),
+  'tag.html': fs.readFileSync(path.join(templatesDir, 'tag.html'), 'utf-8'),
+  'style.css': fs.readFileSync(path.join(templatesDir, 'style.css'), 'utf-8'),
+  'robots.txt': fs.readFileSync(path.join(templatesDir, 'robots.txt'), 'utf-8'),
+  'llms.txt': fs.readFileSync(path.join(templatesDir, 'llms.txt'), 'utf-8'),
+  '404.html': fs.readFileSync(path.join(templatesDir, '404.html'), 'utf-8')
 };
 
 const output = `// AUTO-GENERATED - DO NOT EDIT
-// Generated from templates/ folder by src/embed-templates.js
+// Generated from templates/.default/ folder by src/embed-templates.js
 
 export const EMBEDDED_TEMPLATES = ${JSON.stringify(templates, null, 2)};
 `;

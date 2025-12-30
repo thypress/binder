@@ -17,7 +17,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   <meta property="og:type" content="article">
   <meta property="og:title" content="{{title}}">
   <meta property="og:description" content="{{description}}">
-  <meta property="og:url" content="{{siteUrl}}/post/{{slug}}/">
+  <meta property="og:url" content="{{siteUrl}}{{url}}">
   {{#if ogImage}}
   <meta property="og:image" content="{{siteUrl}}{{ogImage}}">
   {{/if}}
@@ -37,7 +37,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   {{/if}}
 
   <!-- SEO -->
-  <link rel="canonical" href="{{siteUrl}}/post/{{slug}}/">
+  <link rel="canonical" href="{{siteUrl}}{{url}}">
   {{#if author}}
   <meta name="author" content="{{author}}">
   {{/if}}
@@ -65,7 +65,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   },
   "mainEntityOfPage": {
     "@type": "WebPage",
-    "@id": "{{siteUrl}}/post/{{slug}}/"
+    "@id": "{{siteUrl}}{{url}}"
   }
 }
   </script>
@@ -109,12 +109,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     <nav class="post-nav">
       {{#if prevPost}}
         <div class="post-nav-prev">
-          <a href="/post/{{prevPost.slug}}/">← {{prevPost.title}}</a>
+          <a href="{{prevPost.url}}">← {{prevPost.title}}</a>
         </div>
       {{/if}}
       {{#if nextPost}}
         <div class="post-nav-next">
-          <a href="/post/{{nextPost.slug}}/">{{nextPost.title}} →</a>
+          <a href="{{nextPost.url}}">{{nextPost.title}} →</a>
         </div>
       {{/if}}
     </nav>
