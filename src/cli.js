@@ -5,33 +5,24 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// #!/usr/bin/env bun
 import fs from 'fs';
-import fsPromises from 'fs/promises';
 import path from 'path';
-import crypto from 'crypto';
-import zlib from 'zlib';
-import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 import { EMBEDDED_TEMPLATES } from './embedded-templates.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
+import { detectContentStructure } from './renderer.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
-const gzip = promisify(zlib.gzip);
-const brotliCompress = promisify(zlib.brotliCompress);
-
-// Import version from package.json
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
 );
 const VERSION = packageJson.version;
 
-// Parse arguments
 function parseArgs() {
   const args = process.argv.slice(2);
   let command = 'serve';
-  let postsDir = null;
+  let targetDir = null;
   let openBrowser = true;
   let serveAfterBuild = false;
 
@@ -73,115 +64,161 @@ function parseArgs() {
       continue;
     }
 
-    if (arg === '--posts' || arg === '--posts-dir' || arg === '-p') {
-      postsDir = args[i + 1];
+    if (arg === '--dir' || arg === '-d') {
+      targetDir = args[i + 1];
       i++;
       continue;
     }
 
     if (fs.existsSync(arg) && fs.statSync(arg).isDirectory()) {
-      postsDir = arg;
+      targetDir = arg;
       continue;
     }
 
     if (arg.includes('/') || arg.includes('\\')) {
-      postsDir = arg;
+      targetDir = arg;
       continue;
     }
   }
 
-  if (postsDir) {
-    postsDir = path.resolve(postsDir);
+  if (targetDir) {
+    targetDir = path.resolve(targetDir);
   } else {
-    postsDir = path.join(process.cwd(), 'posts');
+    targetDir = process.cwd();
   }
 
-  return { command, postsDir, openBrowser, serveAfterBuild };
+  return { command, targetDir, openBrowser, serveAfterBuild };
 }
 
-const { command, postsDir, openBrowser, serveAfterBuild } = parseArgs();
-
-const workingDir = path.dirname(postsDir);
-const postsFolder = path.basename(postsDir);
-
-function checkTemplatesStaleness() {
-  const templatesDir = path.join(__dirname, '../templates');
-  const embeddedFile = path.join(__dirname, 'embedded-templates.js');
-
-  if (!fs.existsSync(templatesDir) || !fs.existsSync(embeddedFile)) return;
-
-  const files = fs.readdirSync(templatesDir);
-  let newestMtime = 0;
-  for (const file of files) {
-    const filePath = path.join(templatesDir, file);
-    if (fs.statSync(filePath).isFile()) {
-      const mtime = fs.statSync(filePath).mtime.getTime();
-      if (mtime > newestMtime) newestMtime = mtime;
-    }
-  }
-
-  const embeddedMtime = fs.statSync(embeddedFile).mtime.getTime();
-
-  if (newestMtime > embeddedMtime) {
-    console.log(warning('Templates modified since last embed'));
-    console.log(dim('Run: bun src/embed-templates.js'));
-    console.log('');
-  }
-}
+const { command, targetDir, openBrowser, serveAfterBuild } = parseArgs();
 
 function ensureDefaults() {
-  if (!fs.existsSync(postsDir)) {
+  console.log(info(`Working directory: ${targetDir}\n`));
+
+  const { contentRoot, mode, shouldInit } = detectContentStructure(targetDir);
+
+  if (shouldInit) {
+    // Create content/posts/ structure
+    const postsDir = path.join(contentRoot, 'posts');
     fs.mkdirSync(postsDir, { recursive: true });
-    console.log(success(`Created ${postsDir}`));
+    console.log(success(`Created ${contentRoot}`));
+
+    // Create example post
+    const examplePost = path.join(postsDir, '2024-01-01-welcome.md');
+    fs.writeFileSync(examplePost, `---
+title: Welcome to THYPRESS!
+createdAt: 2024-01-01
+updatedAt: 2024-01-15
+tags: [blogging, markdown]
+description: Your first post with THYPRESS
+---
+
+# Welcome to THYPRESS!
+
+This is your first post. Create more \`.md\` files in \`content/posts/\`.
+
+## Front Matter
+
+Add YAML front matter to your posts:
+
+\`\`\`yaml
+---
+title: My Post Title
+createdAt: 2024-01-01
+updatedAt: 2024-01-15
+tags: [tag1, tag2]
+description: A short description
+---
+\`\`\`
+
+## Features
+
+- Write in Markdown, plain text, or HTML
+- Organize with sections and tags
+- Folder-based navigation
+- Client-side search (MiniSearch)
+- Auto-generated RSS & sitemap
+- Image optimization (WebP + responsive)
+- Syntax highlighting
+- Blazing fast hot reload
+- HTTP caching + compression
+
+Happy blogging!
+`);
+    console.log(success(`Created example post\n`));
   }
 
-  const assetsDir = path.join(workingDir, 'assets');
-  if (!fs.existsSync(assetsDir)) {
-    fs.mkdirSync(assetsDir, { recursive: true });
+  // Ensure templates directory with default theme
+  const templatesDir = path.join(targetDir, 'templates');
+  const defaultThemeDir = path.join(templatesDir, '.default');
+
+  if (!fs.existsSync(defaultThemeDir)) {
+    fs.mkdirSync(defaultThemeDir, { recursive: true });
+
+    // Copy embedded templates to .default/
+    const templates = [
+      { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
+      { name: 'post.html', content: EMBEDDED_TEMPLATES['post.html'] },
+      { name: 'tag.html', content: EMBEDDED_TEMPLATES['tag.html'] },
+      { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] },
+      { name: 'robots.txt', content: EMBEDDED_TEMPLATES['robots.txt'] },
+      { name: 'llms.txt', content: EMBEDDED_TEMPLATES['llms.txt'] },
+      { name: '404.html', content: EMBEDDED_TEMPLATES['404.html'] }
+    ];
+
+    templates.forEach(({ name, content }) => {
+      if (content && typeof content === 'string') {
+        fs.writeFileSync(path.join(defaultThemeDir, name), content);
+      }
+    });
+
+    console.log(success(`Created templates/.default/`));
   }
 
-  const configPath = path.join(workingDir, 'config.json');
+  // Check if user theme exists, if not create my-press/ from defaults
+  const themes = fs.existsSync(templatesDir)
+    ? fs.readdirSync(templatesDir).filter(f => !f.startsWith('.') && fs.statSync(path.join(templatesDir, f)).isDirectory())
+    : [];
+
+  if (themes.length === 0) {
+    const myPressDir = path.join(templatesDir, 'my-press');
+    fs.mkdirSync(myPressDir, { recursive: true });
+
+    // Copy defaults to my-press/
+    const templates = [
+      { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
+      { name: 'post.html', content: EMBEDDED_TEMPLATES['post.html'] },
+      { name: 'tag.html', content: EMBEDDED_TEMPLATES['tag.html'] },
+      { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] }
+    ];
+
+    templates.forEach(({ name, content }) => {
+      if (content && typeof content === 'string') {
+        fs.writeFileSync(path.join(myPressDir, name), content);
+      }
+    });
+
+    console.log(success(`Created templates/my-press/ (your theme)\n`));
+  }
+
+  // Ensure config.json
+  const configPath = path.join(targetDir, 'config.json');
   if (!fs.existsSync(configPath)) {
     fs.writeFileSync(configPath, JSON.stringify({
-      title: "My Blog",
-      description: "A blog powered by THYPRESS",
+      title: "My Site",
+      description: "A site powered by THYPRESS",
       url: "https://example.com",
       author: "Anonymous"
     }, null, 2));
-    console.log(success(`Created ${configPath}`));
+    console.log(success(`Created config.json`));
   }
 
-  const templates = [
-    { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
-    { name: 'post.html', content: EMBEDDED_TEMPLATES['post.html'] },
-    { name: 'tag.html', content: EMBEDDED_TEMPLATES['tag.html'] },
-    { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] },
-    { name: 'robots.txt', content: EMBEDDED_TEMPLATES['robots.txt'] },
-    { name: 'llms.txt', content: EMBEDDED_TEMPLATES['llms.txt'] },
-    { name: '404.html', content: EMBEDDED_TEMPLATES['404.html'] }
-  ];
-
-  let created = false;
-  templates.forEach(({ name, content }) => {
-    const dest = path.join(assetsDir, name);
-    if (!fs.existsSync(dest)) {
-      if (content && typeof content === 'string') {
-        fs.writeFileSync(dest, content);
-        console.log(success(`Created ${dest}`));
-        created = true;
-      } else {
-        console.log(warning(`Skipping ${name} - not in embedded templates`));
-      }
-    }
-  });
-
-  if (created) console.log('');
   ensureGitignore();
 }
 
 function ensureGitignore() {
-  const gitignorePath = path.join(workingDir, '.gitignore');
-  const requiredEntries = ['.cache/', 'build/'];
+  const gitignorePath = path.join(targetDir, '.gitignore');
+  const requiredEntries = ['.cache/', 'build/', 'node_modules/'];
 
   let gitignoreContent = '';
   let needsUpdate = false;
@@ -220,88 +257,28 @@ function ensureGitignore() {
   }
 }
 
-function createExamplePost() {
-  if (fs.existsSync(postsDir)) {
-    const mdFiles = fs.readdirSync(postsDir).filter(f => f.endsWith('.md'));
-    if (mdFiles.length === 0) {
-      const examplePost = path.join(postsDir, '2024-01-01-welcome.md');
-      fs.writeFileSync(examplePost, `---
-title: Welcome to THYPRESS!
-createdAt: 2024-01-01
-updatedAt: 2024-01-15
-tags: [blogging, markdown]
-description: Your first post with THYPRESS
----
-
-# Welcome to THYPRESS!
-
-This is your first post. Create more \`.md\` files in \`${postsFolder}/\`.
-
-## Front Matter
-
-Add YAML front matter to your posts:
-
-\`\`\`yaml
----
-title: My Post Title
-createdAt: 2024-01-01
-updatedAt: 2024-01-15
-tags: [tag1, tag2]
-description: A short description
----
-\`\`\`
-
-## Features
-
-- Write in Markdown
-- Organize with tags
-- Folder-based navigation
-- Client-side search (MiniSearch)
-- Auto-generated RSS & sitemap
-- Image optimization (WebP + responsive)
-- Syntax highlighting
-- Blazing fast hot reload
-- HTTP caching + compression
-
-Happy blogging!
-`);
-      console.log(success(`Created example post\n`));
-    }
-  }
-}
-
 async function serve() {
-  console.log(info(`Using posts directory: ${postsDir}\n`));
-  checkTemplatesStaleness();
   ensureDefaults();
-  createExamplePost();
 
-  process.env.THYPRESS_POSTS_DIR = postsDir;
   process.env.THYPRESS_OPEN_BROWSER = openBrowser ? 'true' : 'false';
-  process.chdir(workingDir);
+  process.chdir(targetDir);
 
   await import('./server.js');
 }
 
 async function build() {
-  console.log(info(`Using posts directory: ${postsDir}\n`));
-  checkTemplatesStaleness();
   ensureDefaults();
 
-  process.env.THYPRESS_POSTS_DIR = postsDir;
-  process.chdir(workingDir);
+  process.chdir(targetDir);
 
   const module = await import('./build.js');
   await module.build();
 }
 
 async function buildAndServe() {
-  console.log(info(`Using posts directory: ${postsDir}\n`));
-  checkTemplatesStaleness();
   ensureDefaults();
 
-  process.env.THYPRESS_POSTS_DIR = postsDir;
-  process.chdir(workingDir);
+  process.chdir(targetDir);
 
   const buildModule = await import('./build.js');
   await buildModule.build();
@@ -309,43 +286,16 @@ async function buildAndServe() {
   console.log('\n' + '='.repeat(50));
   console.log(bright('Starting preview server for /build...\n'));
 
-  const buildDir = path.join(workingDir, 'build');
+  const buildDir = path.join(targetDir, 'build');
 
   if (!fs.existsSync(buildDir)) {
     console.error(errorMsg('Error: /build not found'));
     process.exit(1);
   }
 
-  // OPTIMIZED BUILD PREVIEW SERVER
+  // Simple preview server for build output
   const START_PORT = 3009;
   const MAX_PORT_TRIES = 100;
-
-  // In-memory cache for build preview
-  const buildCache = new Map();
-  const MAX_BUILD_CACHE_SIZE = 50 * 1024 * 1024; // 50MB
-  let currentBuildCacheSize = 0;
-
-  function getMimeType(filePath) {
-    const ext = filePath.split('.').pop().toLowerCase();
-    const types = {
-      'html': 'text/html; charset=utf-8',
-      'css': 'text/css',
-      'js': 'text/javascript',
-      'json': 'application/json',
-      'png': 'image/png',
-      'jpg': 'image/jpeg',
-      'jpeg': 'image/jpeg',
-      'gif': 'image/gif',
-      'webp': 'image/webp',
-      'svg': 'image/svg+xml',
-      'xml': 'application/xml; charset=utf-8'
-    };
-    return types[ext] || 'application/octet-stream';
-  }
-
-  function generateETag(content) {
-    return `"${crypto.createHash('md5').update(content).digest('hex')}"`;
-  }
 
   async function findAvailablePort(startPort) {
     for (let port = startPort; port < startPort + MAX_PORT_TRIES; port++) {
@@ -375,12 +325,10 @@ async function buildAndServe() {
       const url = new URL(request.url);
       let filePath = path.join(buildDir, url.pathname);
 
-      // Directory → index.html
       if (url.pathname.endsWith('/')) {
         filePath = path.join(filePath, 'index.html');
       }
 
-      // No extension → try index.html
       if (!path.extname(filePath)) {
         const indexPath = path.join(filePath, 'index.html');
         if (fs.existsSync(indexPath)) {
@@ -388,126 +336,26 @@ async function buildAndServe() {
         }
       }
 
-      const cacheKey = filePath;
-
       try {
-        // Check cache
-        if (buildCache.has(cacheKey)) {
-          const cached = buildCache.get(cacheKey);
-          const ifNoneMatch = request.headers.get('if-none-match');
-
-          if (ifNoneMatch === cached.etag) {
-            return new Response(null, {
-              status: 304,
-              headers: {
-                'ETag': cached.etag,
-                'Cache-Control': cached.cacheControl
-              }
-            });
-          }
-
-          const acceptEncoding = request.headers.get('accept-encoding') || '';
-          let content = cached.raw;
-          let encoding = null;
-
-          if (acceptEncoding.includes('br') && cached.brotli) {
-            content = cached.brotli;
-            encoding = 'br';
-          } else if (acceptEncoding.includes('gzip') && cached.gzip) {
-            content = cached.gzip;
-            encoding = 'gzip';
-          }
-
-          const headers = {
-            'Content-Type': cached.mimeType,
-            'ETag': cached.etag,
-            'Cache-Control': cached.cacheControl
-          };
-
-          if (encoding) headers['Content-Encoding'] = encoding;
-
-          return new Response(content, { headers });
-        }
-
-        // Load from disk
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          const content = await fsPromises.readFile(filePath);
-          const mimeType = getMimeType(filePath);
-          const etag = generateETag(content);
-
-          const cacheControl = mimeType.includes('image') || mimeType.includes('font')
-            ? 'public, max-age=31536000, immutable'
-            : mimeType.includes('css') || mimeType.includes('javascript')
-            ? 'public, max-age=86400, immutable'
-            : 'public, max-age=3600';
-
-          // Pre-compress text-based files
-          let gzipData = null;
-          let brotliData = null;
-
-          if (content.length > 1024 && (
-            mimeType.includes('text') ||
-            mimeType.includes('html') ||
-            mimeType.includes('javascript') ||
-            mimeType.includes('json') ||
-            mimeType.includes('xml') ||
-            mimeType.includes('css')
-          )) {
-            [gzipData, brotliData] = await Promise.all([
-              gzip(content, { level: 6 }),
-              brotliCompress(content, {
-                params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 }
-              })
-            ]);
-          }
-
-          // Cache it
-          if (content.length < 10 * 1024 * 1024) {
-            buildCache.set(cacheKey, {
-              raw: content,
-              mimeType,
-              etag,
-              cacheControl,
-              gzip: gzipData,
-              brotli: brotliData
-            });
-
-            currentBuildCacheSize += content.length;
-            if (gzipData) currentBuildCacheSize += gzipData.length;
-            if (brotliData) currentBuildCacheSize += brotliData.length;
-
-            // Simple LRU eviction
-            while (currentBuildCacheSize > MAX_BUILD_CACHE_SIZE) {
-              const firstKey = buildCache.keys().next().value;
-              const firstItem = buildCache.get(firstKey);
-              currentBuildCacheSize -= firstItem.raw.length;
-              if (firstItem.gzip) currentBuildCacheSize -= firstItem.gzip.length;
-              if (firstItem.brotli) currentBuildCacheSize -= firstItem.brotli.length;
-              buildCache.delete(firstKey);
-            }
-          }
-
-          const acceptEncoding = request.headers.get('accept-encoding') || '';
-          let finalContent = content;
-          let encoding = null;
-
-          if (acceptEncoding.includes('br') && brotliData) {
-            finalContent = brotliData;
-            encoding = 'br';
-          } else if (acceptEncoding.includes('gzip') && gzipData) {
-            finalContent = gzipData;
-            encoding = 'gzip';
-          }
-
-          const headers = {
-            'Content-Type': mimeType,
-            'ETag': etag,
-            'Cache-Control': cacheControl
+          const content = fs.readFileSync(filePath);
+          const mimeTypes = {
+            'html': 'text/html',
+            'css': 'text/css',
+            'js': 'text/javascript',
+            'json': 'application/json',
+            'png': 'image/png',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'webp': 'image/webp',
+            'xml': 'application/xml'
           };
+          const ext = path.extname(filePath).substring(1).toLowerCase();
+          const mimeType = mimeTypes[ext] || 'application/octet-stream';
 
-          if (encoding) headers['Content-Encoding'] = encoding;
-
-          return new Response(finalContent, { headers });
+          return new Response(content, {
+            headers: { 'Content-Type': mimeType }
+          });
         }
       } catch (error) {
         console.error(errorMsg(`Error serving ${filePath}: ${error.message}`));
@@ -519,7 +367,6 @@ async function buildAndServe() {
 
   const serverUrl = `http://localhost:${port}`;
   console.log(success(`Preview server: ${serverUrl}`));
-  console.log(dim(`  Optimized with caching + compression`));
   console.log(dim(`  Press Ctrl+C to stop\n`));
 
   if (openBrowser) {
@@ -531,7 +378,7 @@ async function buildAndServe() {
 }
 
 function clean() {
-  const cacheDir = path.join(workingDir, '.cache');
+  const cacheDir = path.join(targetDir, '.cache');
 
   if (fs.existsSync(cacheDir)) {
     fs.rmSync(cacheDir, { recursive: true, force: true });
@@ -550,7 +397,7 @@ function help() {
 ${bright('THYPRESS')} v${VERSION} - Simple markdown blog/docs engine
 
 ${bright('Usage:')}
-  THYPRESS [command] [options]
+  thypress [command] [options] [directory]
 
 ${bright('Commands:')}
   serve, s, dev           Start server with hot reload (default)
@@ -561,36 +408,41 @@ ${bright('Commands:')}
   help, -h                Show help
 
 ${bright('Options:')}
-  --posts, -p <path>      Posts directory
+  --dir, -d <path>        Target directory (default: current)
   --no-browser            Don't auto-open browser
-  <path>                  Direct posts path
+  [directory]             Direct path to directory
 
 ${bright('Examples:')}
-  THYPRESS                           # Serve from ./posts
-  THYPRESS build                     # Build static site
-  THYPRESS build --serve             # Build + preview
-  THYPRESS --posts ~/blog/posts      # Custom posts dir
+  thypress                           # Serve from current directory
+  thypress build                     # Build static site
+  thypress build --serve             # Build + preview
+  thypress my-blog/                  # Serve from my-blog/
+  thypress --dir ~/blog              # Serve from ~/blog
 
-${bright('Performance Features:')}
-  ✓ HTTP caching (ETag + Cache-Control)
-  ✓ Compression (Brotli + gzip)
-  ✓ Pre-compressed cache variants
-  ✓ Request deduplication
-  ✓ Priority-based LRU cache
-  ✓ Async I/O throughout
+${bright('Structure:')}
+  content/              ← Your content (markdown/text/html)
+    posts/              ← Blog posts
+    docs/               ← Documentation
+    about.md            ← Static pages
+  templates/            ← Themes
+    my-press/           ← Active theme
+    .default/           ← Embedded defaults
+
+${bright('Modes:')}
+  • Structured: content/ with sections (posts/, docs/, etc.)
+  • Legacy: posts/ folder (v0.2.x compatibility)
+  • Simple: flat .md/.txt/.html files in root
 
 ${bright('Docs:')}
-  https://github.com/THYPRESS/THYPRESS
+  https://github.com/thypress/thypress
 `);
 }
 
 switch (command) {
   case 'serve':
-    checkTemplatesStaleness();
     serve();
     break;
   case 'build':
-    checkTemplatesStaleness();
     if (serveAfterBuild) {
       buildAndServe();
     } else {
@@ -608,6 +460,6 @@ switch (command) {
     break;
   default:
     console.log(errorMsg(`Unknown command: ${command}`));
-    console.log(dim('Run `THYPRESS help` for usage.\n'));
+    console.log(dim('Run `thypress help` for usage.\n'));
     process.exit(1);
 }
