@@ -22,6 +22,7 @@
     "gray-matter": "^4.0.3",
     "handlebars": "^4.7.8",
     "highlight.js": "^11.9.0",
+    "htmlparser2": "^10.0.0",
     "markdown-it": "^14.0.0",
     "markdown-it-anchor": "^9.2.0",
     "markdown-it-highlightjs": "^4.0.1",

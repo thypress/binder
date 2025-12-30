@@ -14,10 +14,6 @@ import { exec } from 'child_process';
 import crypto from 'crypto';
 import { promisify } from 'util';
 import zlib from 'zlib';
-import MarkdownIt from 'markdown-it';
-import markdownItHighlight from 'markdown-it-highlightjs';
-import Handlebars from 'handlebars';
-import matter from 'gray-matter';
 import {
   POSTS_PER_PAGE,
   loadAllContent,
@@ -30,10 +26,9 @@ import {
   generateSearchIndex,
   getSiteConfig,
   buildNavigationTree,
-  generateUrl,
-  selectTemplate,
-  processPostMetadata,
-  normalizeToWebPath
+  normalizeToWebPath,
+  processContentFile,
+  getAllTags
 } from './renderer.js';
 import { optimizeToCache, CACHE_DIR } from './build.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
@@ -45,9 +40,6 @@ const DEBOUNCE_DELAY = 500;
 
 const gzip = promisify(zlib.gzip);
 const brotliCompress = promisify(zlib.brotliCompress);
-
-const md = new MarkdownIt();
-md.use(markdownItHighlight);
 
 // State
 let contentCache = new Map();
@@ -62,37 +54,39 @@ let brokenImages = [];
 let contentMode = 'structured';
 let contentRoot = '';
 
-// Build state
-let isBuildingStatic = false;
-let isOptimizingImages = false;
-let optimizeDebounceTimer = null;
-
 // Performance caches
+const renderedCache = new Map();
+const precompressedCache = new Map();
 const staticAssetCache = new Map();
 const dynamicContentCache = new Map();
 const MAX_CACHE_SIZE = 50 * 1024 * 1024;
 let currentCacheSize = 0;
+
+// Build state
+let isBuildingStatic = false;
+let isOptimizingImages = false;
+let optimizeDebounceTimer = null;
 
 // Metrics
 const metrics = {
   requests: 0,
   cacheHits: 0,
   cacheMisses: 0,
-  avgResponseTime: 0,
   responseTimes: []
 };
 
 setInterval(() => {
   if (metrics.requests > 0) {
     const hitRate = ((metrics.cacheHits / (metrics.cacheHits + metrics.cacheMisses)) * 100).toFixed(1);
-    const avgTime = metrics.avgResponseTime.toFixed(2);
+    const avgTime = metrics.responseTimes.length > 0
+      ? (metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length).toFixed(2)
+      : '0.00';
     console.log(dim(`[Metrics] ${metrics.requests} req/10s | Avg: ${avgTime}ms | Cache hit: ${hitRate}%`));
   }
   metrics.requests = 0;
   metrics.cacheHits = 0;
   metrics.cacheMisses = 0;
   metrics.responseTimes = [];
-  metrics.avgResponseTime = 0;
 }, 10000);
 
 function getMimeType(filePath) {
@@ -200,6 +194,39 @@ async function serveWithCache(content, mimeType, request, options = {}) {
   return new Response(finalContent, { headers });
 }
 
+function servePrecompressed(slug, request, mimeType = 'text/html; charset=utf-8') {
+  const acceptEncoding = request.headers.get('accept-encoding') || '';
+  const ifNoneMatch = request.headers.get('if-none-match');
+
+  const preferBrotli = acceptEncoding.includes('br');
+  const cacheKey = preferBrotli ? `${slug}:br` : `${slug}:gzip`;
+
+  const cached = precompressedCache.get(cacheKey);
+  if (!cached) return null;
+
+  if (ifNoneMatch === cached.etag) {
+    metrics.cacheHits++;
+    return new Response(null, {
+      status: 304,
+      headers: {
+        'ETag': cached.etag,
+        'Cache-Control': getCacheControl(mimeType)
+      }
+    });
+  }
+
+  metrics.cacheMisses++;
+  return new Response(cached.content, {
+    headers: {
+      'Content-Type': mimeType,
+      'Content-Encoding': cached.encoding,
+      'ETag': cached.etag,
+      'Cache-Control': getCacheControl(mimeType),
+      'Vary': 'Accept-Encoding'
+    }
+  });
+}
+
 async function serve404(request) {
   const cacheKey = '404.html';
 
@@ -235,6 +262,78 @@ async function serve404(request) {
   });
 }
 
+async function preRenderAllContent() {
+  console.log(info('Pre-rendering all pages...'));
+
+  renderedCache.clear();
+
+  for (const [slug, content] of contentCache) {
+    try {
+      if (content.type === 'html' && content.renderedHtml !== null) {
+        renderedCache.set(slug, content.renderedHtml);
+      } else {
+        const html = renderContent(content, slug, templatesCache, navigation, siteConfig, contentCache);
+        renderedCache.set(slug, html);
+      }
+    } catch (error) {
+      console.error(errorMsg(`Failed to pre-render ${slug}: ${error.message}`));
+    }
+  }
+
+  const totalPages = Math.ceil(contentCache.size / POSTS_PER_PAGE);
+  for (let page = 1; page <= totalPages; page++) {
+    try {
+      const html = renderContentList(contentCache, page, templatesCache, navigation, siteConfig);
+      renderedCache.set(`__index_${page}`, html);
+    } catch (error) {
+      console.error(errorMsg(`Failed to pre-render page ${page}: ${error.message}`));
+    }
+  }
+
+  const allTags = getAllTags(contentCache);
+  for (const tag of allTags) {
+    try {
+      const html = renderTagPage(contentCache, tag, templatesCache, navigation);
+      renderedCache.set(`__tag_${tag}`, html);
+    } catch (error) {
+      console.error(errorMsg(`Failed to pre-render tag ${tag}: ${error.message}`));
+    }
+  }
+
+  console.log(success(`Pre-rendered ${renderedCache.size} pages`));
+}
+
+async function preCompressContent() {
+  console.log(info('Pre-compressing content...'));
+
+  precompressedCache.clear();
+
+  for (const [slug, html] of renderedCache) {
+    const buffer = Buffer.from(html);
+    const etag = generateETag(buffer);
+
+    try {
+      const gzipped = await gzip(buffer);
+      precompressedCache.set(`${slug}:gzip`, {
+        content: gzipped,
+        encoding: 'gzip',
+        etag: etag
+      });
+
+      const brotlied = await brotliCompress(buffer);
+      precompressedCache.set(`${slug}:br`, {
+        content: brotlied,
+        encoding: 'br',
+        etag: etag
+      });
+    } catch (error) {
+      console.error(errorMsg(`Failed to compress ${slug}: ${error.message}`));
+    }
+  }
+
+  console.log(success(`Pre-compressed ${renderedCache.size} pages (${precompressedCache.size / 2} × 2 formats)`));
+}
+
 async function reloadContent() {
   const result = loadAllContent();
   contentCache = result.contentCache;
@@ -246,6 +345,10 @@ async function reloadContent() {
   contentRoot = result.contentRoot;
 
   invalidateDynamicCaches();
+
+  await preRenderAllContent();
+  await preCompressContent();
+
   scheduleImageOptimization();
 }
 
@@ -275,6 +378,9 @@ async function reloadTheme() {
   activeTheme = result.activeTheme;
 
   dynamicContentCache.delete('404.html');
+
+  await preRenderAllContent();
+  await preCompressContent();
 }
 
 function loadSingleContent(filename) {
@@ -282,110 +388,31 @@ function loadSingleContent(filename) {
   if (!/\.(md|txt|html)$/i.test(webPath)) return;
 
   try {
-    const ext = path.extname(webPath).toLowerCase();
-    const isMarkdown = ext === '.md';
-    const isText = ext === '.txt';
-    const isHtml = ext === '.html';
-
-    const url = generateUrl(webPath, contentMode);
-    const slug = url.substring(1).replace(/\/$/, '') || 'index';
-
-    slugMap.set(webPath, slug);
-
     const fullPath = path.join(contentRoot, filename);
+    const result = processContentFile(fullPath, filename, contentMode, contentRoot);
 
-    // HTML files are served as-is
-    if (isHtml) {
-      const htmlContent = fsSync.readFileSync(fullPath, 'utf-8');
+    contentCache.set(result.slug, result.content);
+    slugMap.set(webPath, result.slug);
 
-      contentCache.set(slug, {
-        filename: webPath,
-        slug: slug,
-        url: url,
-        title: path.basename(filename, '.html'),
-        date: fsSync.statSync(fullPath).mtime.toISOString().split('T')[0],
-        createdAt: fsSync.statSync(fullPath).mtime.toISOString().split('T')[0],
-        updatedAt: fsSync.statSync(fullPath).mtime.toISOString().split('T')[0],
-        tags: [],
-        description: '',
-        content: htmlContent,
-        renderedHtml: htmlContent,
-        frontMatter: {},
-        relativePath: webPath,
-        type: 'html',
-        wordCount: 0,
-        readingTime: 0
-      });
-
-      console.log(success(`Content '${path.basename(filename)}' loaded`));
-      invalidateDynamicCaches();
-      return;
+    if (result.imageReferences.length > 0) {
+      imageReferences.set(webPath, result.imageReferences);
     }
-
-    const rawContent = fsSync.readFileSync(fullPath, 'utf-8');
-    const { data: frontMatter, content } = matter(rawContent);
-
-    const env = { postRelativePath: webPath, referencedImages: [], contentDir: contentRoot };
-    const renderedHtml = isMarkdown ? md.render(content, env) : `<pre>${content}</pre>`;
-
-    if (env.referencedImages.length > 0) {
-      imageReferences.set(webPath, env.referencedImages);
-    }
-
-    const { createdAt, updatedAt, wordCount, readingTime, title } = processPostMetadata(
-      content,
-      filename,
-      frontMatter,
-      isMarkdown,
-      fullPath
-    );
-
-    const tags = Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []);
-    const description = frontMatter.description || '';
-
-    let section = null;
-    if (contentMode === 'structured') {
-      section = webPath.split('/')[0];
-    } else if (contentMode === 'legacy') {
-      section = 'posts';
-    }
-
-    contentCache.set(slug, {
-      filename: webPath,
-      slug: slug,
-      url: url,
-      title: title,
-      date: createdAt,
-      createdAt: createdAt,
-      updatedAt: updatedAt,
-      tags: tags,
-      description: description,
-      content: content,
-      renderedHtml: renderedHtml,
-      frontMatter: frontMatter,
-      relativePath: webPath,
-      wordCount: wordCount,
-      readingTime: readingTime,
-      section: section,
-      type: isMarkdown ? 'markdown' : 'text'
-    });
 
     console.log(success(`Content '${path.basename(filename)}' loaded`));
     invalidateDynamicCaches();
   } catch (error) {
-    console.error(errorMsg(`Error loading content '${path.basename(filename)}': ${error.message}`));
+    console.error(errorMsg(`Error loading '${path.basename(filename)}': ${error.message}`));
   }
 }
 
-/**
- * Resolve homepage with priority order
- */
 function resolveHomepage(request) {
-  // 1. config.json override
   if (siteConfig.index) {
     const customContent = contentCache.get(siteConfig.index);
     if (customContent) {
-      if (customContent.type === 'html') {
+      const precompressed = servePrecompressed(siteConfig.index, request);
+      if (precompressed) return precompressed;
+
+      if (customContent.type === 'html' && customContent.renderedHtml !== null) {
         return serveWithCache(customContent.renderedHtml, 'text/html; charset=utf-8', request);
       }
       const html = renderContent(customContent, customContent.slug, templatesCache, navigation, siteConfig, contentCache);
@@ -393,17 +420,21 @@ function resolveHomepage(request) {
     }
   }
 
-  // 2. content/index.* (any extension)
   const indexContent = contentCache.get('index');
   if (indexContent) {
-    if (indexContent.type === 'html') {
+    const precompressed = servePrecompressed('index', request);
+    if (precompressed) return precompressed;
+
+    if (indexContent.type === 'html' && indexContent.renderedHtml !== null) {
       return serveWithCache(indexContent.renderedHtml, 'text/html; charset=utf-8', request);
     }
     const html = renderContent(indexContent, 'index', templatesCache, navigation, siteConfig, contentCache);
     return serveWithCache(html, 'text/html; charset=utf-8', request);
   }
 
-  // 3. Auto-generated post listing (default)
+  const precompressed = servePrecompressed('__index_1', request);
+  if (precompressed) return precompressed;
+
   const html = renderContentList(contentCache, 1, templatesCache, navigation, siteConfig);
   return serveWithCache(html, 'text/html; charset=utf-8', request);
 }
@@ -436,6 +467,8 @@ try {
           if (fsSync.existsSync(fullPath)) {
             loadSingleContent(filename);
             navigation = buildNavigationTree(contentRoot, contentCache, contentMode);
+            await preRenderAllContent();
+            await preCompressContent();
             const result = loadAllContent();
             imageReferences = result.imageReferences;
             scheduleImageOptimization();
@@ -445,6 +478,9 @@ try {
               contentCache.delete(slug);
               slugMap.delete(webPath);
               imageReferences.delete(webPath);
+              renderedCache.delete(slug);
+              precompressedCache.delete(`${slug}:gzip`);
+              precompressedCache.delete(`${slug}:br`);
               console.log(success(`Content '${path.basename(filename)}' removed from cache`));
               navigation = buildNavigationTree(contentRoot, contentCache, contentMode);
             }
@@ -452,6 +488,8 @@ try {
         } else if (event === 'change') {
           loadSingleContent(filename);
           navigation = buildNavigationTree(contentRoot, contentCache, contentMode);
+          await preRenderAllContent();
+          await preCompressContent();
           scheduleImageOptimization();
         }
       }
@@ -522,7 +560,7 @@ async function findAvailablePort(startPort) {
       continue;
     }
   }
-  throw new Error(`Could not find available port after trying ${MAX_PORT_TRIES} ports`);
+  throw new Error('No available port');
 }
 
 const port = await findAvailablePort(START_PORT);
@@ -543,6 +581,45 @@ Bun.serve({
 
       // Admin page
       if (route === '/__thypress/' || route === '/__thypress') {
+        const htmlFiles = Array.from(contentCache.values()).filter(c => c.type === 'html');
+        const htmlFilesTable = htmlFiles.length > 0 ? `
+<h2>HTML File Handling</h2>
+<div class="stats">
+  <p><strong>Detection rules:</strong></p>
+  <ul style="list-style: disc; margin-left: 20px; line-height: 1.8;">
+    <li>Files with <code>&lt;!DOCTYPE html&gt;</code>, <code>&lt;html&gt;</code>, <code>&lt;head&gt;</code>, or <code>&lt;body&gt;</code> → raw (no template)</li>
+    <li>Partial HTML (just <code>&lt;div&gt;</code>, <code>&lt;section&gt;</code>, etc) → templated (uses template)</li>
+    <li>Front matter <code>template: none</code> → force raw</li>
+    <li>Front matter <code>template: post</code> → force templated</li>
+  </ul>
+</div>
+
+<h3>HTML Files (${htmlFiles.length})</h3>
+<div class="stats">
+  <table style="width: 100%; border-collapse: collapse;">
+    <thead>
+      <tr style="border-bottom: 1px solid #ddd;">
+        <th style="text-align: left; padding: 8px;">File</th>
+        <th style="text-align: left; padding: 8px;">Mode</th>
+        <th style="text-align: left; padding: 8px;">Template</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${htmlFiles.map(c => {
+        const isRaw = c.renderedHtml !== null;
+        const template = c.frontMatter?.template || (isRaw ? 'none' : 'post');
+        return `
+          <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 8px;"><code>${c.filename}</code></td>
+            <td style="padding: 8px;">${isRaw ? 'Raw' : 'Templated'}</td>
+            <td style="padding: 8px;"><code>${template}</code></td>
+          </tr>
+        `;
+      }).join('')}
+    </tbody>
+  </table>
+</div>` : '';
+
         const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -621,10 +698,14 @@ Bun.serve({
     <p><strong>Mode:</strong> ${contentMode}</p>
     <p><strong>Content root:</strong> ${contentRoot}</p>
     <p><strong>Active theme:</strong> ${activeTheme || '.default (embedded)'}</p>
+    <p><strong>Pre-rendered pages:</strong> ${renderedCache.size}</p>
+    <p><strong>Pre-compressed:</strong> ${precompressedCache.size / 2} pages × 2 formats</p>
     <p><strong>Images cached:</strong> ${imageReferences.size} files with images</p>
     <p><strong>Static cache:</strong> ${staticAssetCache.size} files (${(currentCacheSize / 1024 / 1024).toFixed(2)} MB)</p>
     <p><strong>Server:</strong> http://localhost:${port}</p>
   </div>
+
+  ${htmlFilesTable}
 
   <h2>Build Static Site</h2>
   <p>Generate a complete static build in /build folder for deployment.</p>
@@ -728,10 +809,15 @@ Bun.serve({
 
       // Clear cache endpoint
       if (route === '/__thypress/clear-cache' && request.method === 'POST') {
-        const itemsFreed = staticAssetCache.size + dynamicContentCache.size;
+        const itemsFreed = staticAssetCache.size + dynamicContentCache.size + renderedCache.size + precompressedCache.size;
         staticAssetCache.clear();
         dynamicContentCache.clear();
+        renderedCache.clear();
+        precompressedCache.clear();
         currentCacheSize = 0;
+
+        await preRenderAllContent();
+        await preCompressContent();
 
         return new Response(JSON.stringify({
           success: true,
@@ -785,12 +871,10 @@ Bun.serve({
       if (route.startsWith('/assets/')) {
         const assetPath = route.substring(8);
 
-        // Check if it's a templated asset
         if (themeAssets.has(assetPath)) {
           const asset = themeAssets.get(assetPath);
 
           if (asset.type === 'template') {
-            // Render with site config
             const rendered = asset.compiled({
               siteUrl: siteConfig.url || 'https://example.com',
               siteTitle: siteConfig.title || 'My Site',
@@ -799,12 +883,10 @@ Bun.serve({
             });
             return serveWithCache(rendered, getMimeType(assetPath), request);
           } else {
-            // Serve static
             return serveWithCache(asset.content, getMimeType(assetPath), request);
           }
         }
 
-        // Fall back to embedded assets
         const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
         const assetName = path.basename(assetPath);
         if (EMBEDDED_TEMPLATES[assetName]) {
@@ -881,10 +963,10 @@ Bun.serve({
           }
         }
 
-        // Fall back to embedded
         const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
         if (EMBEDDED_TEMPLATES[filename]) {
-          const template = Handlebars.compile(EMBEDDED_TEMPLATES[filename]);
+          const Handlebars = await import('handlebars');
+          const template = Handlebars.default.compile(EMBEDDED_TEMPLATES[filename]);
           const rendered = template({
             siteUrl: siteConfig.url || 'https://example.com',
             ...siteConfig
@@ -896,6 +978,10 @@ Bun.serve({
       // Tag pages
       if (route.startsWith('/tag/')) {
         const tag = route.substring(5).replace(/\/$/, '');
+
+        const precompressed = servePrecompressed(`__tag_${tag}`, request);
+        if (precompressed) return precompressed;
+
         try {
           const html = renderTagPage(contentCache, tag, templatesCache, navigation);
           return serveWithCache(html, 'text/html; charset=utf-8', request);
@@ -909,6 +995,10 @@ Bun.serve({
         const pageMatch = route.match(/^\/page\/(\d+)\/?$/);
         if (pageMatch) {
           const page = parseInt(pageMatch[1], 10);
+
+          const precompressed = servePrecompressed(`__index_${page}`, request);
+          if (precompressed) return precompressed;
+
           try {
             const html = renderContentList(contentCache, page, templatesCache, navigation, siteConfig);
             return serveWithCache(html, 'text/html; charset=utf-8', request);
@@ -928,8 +1018,11 @@ Bun.serve({
       const content = contentCache.get(slug);
 
       if (content) {
+        const precompressed = servePrecompressed(slug, request);
+        if (precompressed) return precompressed;
+
         try {
-          if (content.type === 'html') {
+          if (content.type === 'html' && content.renderedHtml !== null) {
             return serveWithCache(content.renderedHtml, 'text/html; charset=utf-8', request);
           }
 
@@ -958,7 +1051,6 @@ Bun.serve({
     } finally {
       const responseTime = Date.now() - startTime;
       metrics.responseTimes.push(responseTime);
-      metrics.avgResponseTime = metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length;
     }
   }
 });
@@ -970,7 +1062,8 @@ console.log(bright(`
 • Content mode: ${contentMode}
 • Content root: ${contentRoot}
 • Active theme: ${activeTheme || '.default (embedded)'}
-• Performance optimizations enabled
+• Pre-rendered: ${renderedCache.size} pages
+• Pre-compressed: ${precompressedCache.size / 2} pages × 2 formats
 • Admin panel: ${serverUrl}/__thypress/
 `));
 

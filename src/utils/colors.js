@@ -40,10 +40,10 @@ const supportsColor = () => {
 const paint = (colorCode, text) => supportsColor() ? `${colorCode}${text}${colors.reset}` : text;
 
 // Standardized to 1 space after icon for alignment
-export const success = (msg) => `${paint(colors.green, '[Success]')} ${msg}`;
-export const error = (msg) => `${paint(colors.red, '[Error]')} ${msg}`;
-export const warning = (msg) => `${paint(colors.yellow, '[Warning]')} ${msg}`;
-export const info = (msg) => `${paint(colors.blue, '[Info]')} ${msg}`;
+export const success = (msg) => `${paint(colors.green, '[done]')} ${msg}`;
+export const error = (msg) => `${paint(colors.red, '[fail]')} ${msg}`;
+export const warning = (msg) => `${paint(colors.yellow, '[warn]')} ${msg}`;
+export const info = (msg) => `${paint(colors.blue, '[info]')} ${msg}`;
 
 export const dim = (msg) => paint(colors.dim, msg);
 export const bright = (msg) => paint(colors.bright, msg);
