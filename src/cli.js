@@ -103,7 +103,7 @@ function ensureDefaults() {
     fs.mkdirSync(postsDir, { recursive: true });
     console.log(success(`Created ${contentRoot}`));
 
-    // Create example post with proper heading structure for TOC demo
+    // Create example post with updated conventions documentation
     const examplePost = path.join(postsDir, '2024-01-01-welcome.md');
     fs.writeFileSync(examplePost, `---
 title: Welcome to THYPRESS!
@@ -132,6 +132,7 @@ createdAt: 2024-01-01
 updatedAt: 2024-01-15
 tags: [tag1, tag2]
 description: A short description
+draft: false  # Set to true to hide from site
 ---
 \`\`\`
 
@@ -142,6 +143,80 @@ THYPRESS supports three content types:
 - **Markdown** (\`.md\`) - Full CommonMark + GFM support
 - **Plain text** (\`.txt\`) - Rendered in \`<pre>\` tags
 - **HTML** (\`.html\`) - Complete documents or fragments
+
+## THYPRESS Conventions
+
+### Drafts (Content)
+
+Keep work-in-progress content hidden with these methods:
+
+1. **\`drafts/\` folder** - Place anywhere in \`content/\`:
+   \`\`\`
+   content/
+   ├── posts/
+   │   ├── published.md
+   │   └── drafts/         ← Everything here is ignored
+   │       └── wip.md
+   └── drafts/             ← Top-level drafts
+       └── another-wip.md
+   \`\`\`
+
+2. **\`draft: true\` in front matter**:
+   \`\`\`yaml
+   ---
+   title: Work in Progress
+   draft: true  # This post won't be published
+   ---
+   \`\`\`
+
+3. **Dot prefix** - Hide any file/folder:
+   \`\`\`
+   content/
+   ├── .notes/             ← Ignored folder
+   └── .scratch.md         ← Ignored file
+   \`\`\`
+
+### Partials (Templates)
+
+Reusable template fragments are detected by:
+
+1. **\`partials/\` folder** in your theme:
+   \`\`\`
+   templates/
+   └── my-press/
+       ├── partials/       ← Put partials here
+       │   ├── header.html
+       │   └── footer.html
+       └── post.html
+   \`\`\`
+
+2. **Underscore prefix** (Handlebars/Sass convention):
+   \`\`\`
+   templates/
+   └── my-press/
+       ├── _header.html    ← Also a partial
+       └── post.html
+   \`\`\`
+
+3. **\`partial: true\` in front matter** (template files):
+   \`\`\`yaml
+   ---
+   partial: true
+   ---
+   <aside>...</aside>
+   \`\`\`
+
+### Universal Ignore Rule
+
+**Files/folders starting with \`.\` are ignored everywhere** (both content and templates):
+
+\`\`\`
+.hidden-file.md          ← Ignored
+.experimental/           ← Ignored folder
+templates/.backup/       ← Ignored
+\`\`\`
+
+This matches Unix/system file conventions.
 
 ## Core Features
 
@@ -197,16 +272,18 @@ Every page includes:
 
 ## Content Organization
 
-### Structured Mode
-
-The recommended way to organize content:
+### Structured Mode (Recommended)
 
 \`\`\`
 content/
-├── posts/           → Blog posts
-├── docs/            → Documentation
-├── guides/          → Tutorial guides
-└── about.md         → Static pages
+├── posts/              → Blog posts
+│   ├── published.md
+│   └── drafts/         → Drafts (ignored)
+│       └── wip.md
+├── docs/               → Documentation
+├── guides/             → Tutorial guides
+├── about.md            → Static pages
+└── .notes/             → Hidden (ignored)
 \`\`\`
 
 ### URL Generation
@@ -538,15 +615,25 @@ ${bright('Structure:')}
   content/              ← Your content (markdown/text/html)
     posts/              ← Blog posts
     docs/               ← Documentation
+    guides/             ← Tutorial guides
     about.md            ← Static pages
   templates/            ← Themes
     my-press/           ← Active theme
     .default/           ← Embedded defaults
 
-${bright('Modes:')}
-  • Structured: content/ with sections (posts/, docs/, etc.)
-  • Legacy: posts/ folder (v0.2.x compatibility)
-  • Simple: flat .md/.txt/.html files in root
+${bright('Conventions:')}
+  ${bright('Drafts (Content):')}
+    drafts/             ← Folder anywhere in content/ (ignored)
+    .file.md            ← Dot prefix = hidden/ignored
+    draft: true         ← Front matter flag
+
+  ${bright('Partials (Templates):')}
+    partials/           ← Folder in theme (auto-registered)
+    _partial.html       ← Underscore prefix (Handlebars convention)
+    partial: true       ← Front matter flag
+
+  ${bright('Universal:')}
+    .anything           ← Ignored everywhere (content + templates)
 
 ${bright('Docs:')}
   https://github.com/thypress/thypress

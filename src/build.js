@@ -32,6 +32,13 @@ const CACHE_DIR = path.join(process.cwd(), '.cache');
 
 const CONCURRENCY = Math.max(2, Math.floor(os.availableParallelism() * 0.75));
 
+/**
+ * Check if file/folder should be ignored (starts with .)
+ */
+function shouldIgnore(name) {
+  return name.startsWith('.');
+}
+
 function ensureBuildDir() {
   if (fs.existsSync(BUILD_DIR)) {
     fs.rmSync(BUILD_DIR, { recursive: true, force: true });
@@ -45,6 +52,9 @@ function copyDirectory(src, dest) {
   const entries = fs.readdirSync(src, { withFileTypes: true });
 
   for (const entry of entries) {
+    // Skip hidden files/folders
+    if (shouldIgnore(entry.name)) continue;
+
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
 
@@ -76,8 +86,14 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+      // Skip hidden files/folders
+      if (shouldIgnore(entry.name)) continue;
+      // Skip files starting with underscore (partials)
+      if (entry.name.startsWith('_')) continue;
+      // Skip .html files (templates)
       if (entry.name.endsWith('.html')) continue;
+      // Skip partials folder
+      if (entry.isDirectory() && entry.name === 'partials') continue;
 
       const srcPath = path.join(dir, entry.name);
       const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
@@ -245,6 +261,9 @@ function cleanupOrphanedImages(imageReferences, cacheDir) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
+      // Skip hidden files/folders
+      if (shouldIgnore(entry.name)) continue;
+
       const fullPath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {
@@ -474,7 +493,10 @@ function copyStaticFilesFromContent(contentRoot) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+      // Skip hidden files/folders
+      if (shouldIgnore(entry.name)) continue;
+      // Skip drafts folders
+      if (entry.isDirectory() && entry.name === 'drafts') continue;
 
       const srcPath = path.join(dir, entry.name);
       const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
