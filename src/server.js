@@ -41,6 +41,21 @@ const DEBOUNCE_DELAY = 500;
 const gzip = promisify(zlib.gzip);
 const brotliCompress = promisify(zlib.brotliCompress);
 
+/**
+ * Check if file/folder should be ignored (starts with .)
+ */
+function shouldIgnore(name) {
+  return name.startsWith('.');
+}
+
+/**
+ * Check if path contains drafts folder
+ */
+function isInDraftsFolder(filename) {
+  const parts = filename.split(path.sep);
+  return parts.includes('drafts');
+}
+
 // State
 let contentCache = new Map();
 let slugMap = new Map();
@@ -391,6 +406,12 @@ function loadSingleContent(filename) {
     const fullPath = path.join(contentRoot, filename);
     const result = processContentFile(fullPath, filename, contentMode, contentRoot);
 
+    // Skip if null (draft)
+    if (!result) {
+      console.log(dim(`Skipped draft: ${path.basename(filename)}`));
+      return;
+    }
+
     contentCache.set(result.slug, result.content);
     slugMap.set(webPath, result.slug);
 
@@ -467,6 +488,12 @@ try {
   watch(contentRoot, { recursive: true }, async (event, filename) => {
     if (!filename) return;
 
+    // Skip hidden files/folders
+    if (shouldIgnore(path.basename(filename))) return;
+
+    // Skip drafts folders
+    if (isInDraftsFolder(filename)) return;
+
     const webPath = normalizeToWebPath(filename);
 
     try {
@@ -525,6 +552,10 @@ try {
   if (fsSync.existsSync(themesDir)) {
     watch(themesDir, { recursive: true }, async (event, filename) => {
       if (!filename) return;
+
+      // Skip hidden files/folders
+      if (shouldIgnore(path.basename(filename))) return;
+
       console.log(info(`Theme: ${event} - ${filename}`));
       await reloadTheme();
     });

@@ -38,6 +38,21 @@ Handlebars.registerHelper('eq', (a, b) => a === b);
 Handlebars.registerHelper('multiply', (a, b) => a * b);
 
 /**
+ * Check if file/folder should be ignored (starts with .)
+ */
+function shouldIgnore(name) {
+  return name.startsWith('.');
+}
+
+/**
+ * Check if path is inside a drafts folder
+ */
+function isInDraftsFolder(relativePath) {
+  const parts = relativePath.split(path.sep);
+  return parts.some(part => part === 'drafts');
+}
+
+/**
  * Detect if HTML content is a complete document vs a fragment
  */
 function isCompleteHtmlDocument(htmlContent) {
@@ -197,6 +212,12 @@ export function processContentFile(fullPath, relativePath, mode, contentDir) {
   if (isHtml) {
     const rawHtml = fs.readFileSync(fullPath, 'utf-8');
     const { data: frontMatter, content: htmlContent } = matter(rawHtml);
+
+    // Check if draft
+    if (frontMatter.draft === true) {
+      return null; // Skip drafts
+    }
+
     const intent = detectHtmlIntent(htmlContent, frontMatter);
 
     let section = null;
@@ -244,6 +265,11 @@ export function processContentFile(fullPath, relativePath, mode, contentDir) {
 
   const rawContent = fs.readFileSync(fullPath, 'utf-8');
   const { data: frontMatter, content } = matter(rawContent);
+
+  // Check if draft
+  if (frontMatter.draft === true) {
+    return null; // Skip drafts
+  }
 
   const env = {
     postRelativePath: webPath,
@@ -635,11 +661,15 @@ export function buildNavigationTree(contentRoot, contentCache = new Map(), mode 
     const items = [];
 
     for (const entry of entries) {
-      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+      // Skip hidden files/folders (. prefix)
+      if (shouldIgnore(entry.name)) continue;
 
       const fullPath = path.join(dir, entry.name);
       const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
       const webPath = normalizeToWebPath(relPath);
+
+      // Skip drafts folders
+      if (entry.isDirectory() && entry.name === 'drafts') continue;
 
       if (entry.isDirectory()) {
         const children = processDirectory(fullPath, relPath);
@@ -754,15 +784,33 @@ export function loadAllContent() {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+      // Skip hidden files/folders (. prefix)
+      if (shouldIgnore(entry.name)) continue;
 
       const fullPath = path.join(dir, entry.name);
       const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
       const webPath = normalizeToWebPath(relPath);
 
+      // Skip drafts folders
+      if (entry.isDirectory() && entry.name === 'drafts') {
+        console.log(dim(`Skipping drafts folder: ${webPath}`));
+        continue;
+      }
+
+      // Check if path is inside a drafts folder
+      if (isInDraftsFolder(relPath)) {
+        continue;
+      }
+
       if (entry.isDirectory()) {
         loadContentFromDir(fullPath, relPath);
       } else if (/\.(md|txt|html)$/i.test(entry.name)) {
+        // Warn if underscore is used in content files
+        if (entry.name.startsWith('_')) {
+          console.log(warning(`${webPath} uses underscore prefix (intended for template partials, not content)`));
+          console.log(dim(`  Consider using drafts/ folder or draft: true in front matter for drafts`));
+        }
+
         try {
           const ext = path.extname(entry.name).toLowerCase();
           const isMarkdown = ext === '.md';
@@ -774,6 +822,9 @@ export function loadAllContent() {
           }
 
           const result = processContentFile(fullPath, relPath, mode, contentRoot);
+
+          // Skip if null (draft content)
+          if (!result) continue;
 
           contentCache.set(result.slug, result.content);
           slugMap.set(webPath, result.slug);
@@ -842,115 +893,155 @@ export function selectTemplate(content, templates, defaultTemplate = 'post') {
 /**
  * Load theme from templates directory
  */
- export async function loadTheme(themeName = null) {
-   const templatesDir = path.join(process.cwd(), 'templates');
-   const templatesCache = new Map();
-   const themeAssets = new Map();
+export async function loadTheme(themeName = null) {
+  const templatesDir = path.join(process.cwd(), 'templates');
+  const templatesCache = new Map();
+  const themeAssets = new Map();
 
-   let activeTheme = themeName;
+  let activeTheme = themeName;
 
-   if (!activeTheme) {
-     if (fs.existsSync(templatesDir)) {
-       const themes = fs.readdirSync(templatesDir)
-         .filter(f => {
-           const fullPath = path.join(templatesDir, f);
-           return !f.startsWith('.') && fs.statSync(fullPath).isDirectory();
-         });
+  if (!activeTheme) {
+    if (fs.existsSync(templatesDir)) {
+      const themes = fs.readdirSync(templatesDir)
+        .filter(f => {
+          const fullPath = path.join(templatesDir, f);
+          return !shouldIgnore(f) && fs.statSync(fullPath).isDirectory();
+        });
 
-       if (themes.length === 1) {
-         activeTheme = themes[0];
-       } else if (themes.includes('my-press')) {
-         activeTheme = 'my-press';
-       }
-     }
-   }
+      if (themes.length === 1) {
+        activeTheme = themes[0];
+      } else if (themes.includes('my-press')) {
+        activeTheme = 'my-press';
+      }
+    }
+  }
 
-   const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+  const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
 
-   function compileTemplate(name, content) {
-     try {
-       return Handlebars.compile(content);
-     } catch (error) {
-       console.error(errorMsg(`Failed to compile template '${name}': ${error.message}`));
-       return null;
-     }
-   }
+  function compileTemplate(name, content) {
+    try {
+      return Handlebars.compile(content);
+    } catch (error) {
+      console.error(errorMsg(`Failed to compile template '${name}': ${error.message}`));
+      return null;
+    }
+  }
 
-   // Load embedded templates first
-   for (const [name, content] of Object.entries(EMBEDDED_TEMPLATES)) {
-     if (name.endsWith('.html')) {
-       const templateName = name.replace('.html', '');
+  // Load embedded templates first
+  for (const [name, content] of Object.entries(EMBEDDED_TEMPLATES)) {
+    if (name.endsWith('.html')) {
+      const templateName = name.replace('.html', '');
 
-       // Register partials (files starting with _)
-       if (name.startsWith('_')) {
-         Handlebars.registerPartial(templateName, content);
-       } else {
-         const compiled = compileTemplate(templateName, content);
-         if (compiled) {
-           templatesCache.set(templateName, compiled);
-         }
-       }
-     }
-   }
+      // Register partials (files starting with _)
+      if (name.startsWith('_')) {
+        Handlebars.registerPartial(templateName, content);
+      } else {
+        const compiled = compileTemplate(templateName, content);
+        if (compiled) {
+          templatesCache.set(templateName, compiled);
+        }
+      }
+    }
+  }
 
-   if (activeTheme) {
-     const themePath = path.join(templatesDir, activeTheme);
+  if (activeTheme) {
+    const themePath = path.join(templatesDir, activeTheme);
 
-     if (fs.existsSync(themePath)) {
-       console.log(success(`Loading theme: ${activeTheme}`));
+    if (fs.existsSync(themePath)) {
+      console.log(success(`Loading theme: ${activeTheme}`));
 
-       function loadThemeFiles(dir, relativePath = '') {
-         const entries = fs.readdirSync(dir, { withFileTypes: true });
+      // First, scan for partials in partials/ folder
+      const partialsDir = path.join(themePath, 'partials');
+      if (fs.existsSync(partialsDir)) {
+        function scanPartialsFolder(dir, relativePath = '') {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-         for (const entry of entries) {
-           // FIXED: Only skip hidden files (.), allow _ files for partials
-           if (entry.name.startsWith('.')) continue;
+          for (const entry of entries) {
+            // Skip hidden files/folders
+            if (shouldIgnore(entry.name)) continue;
 
-           const fullPath = path.join(dir, entry.name);
-           const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+            const fullPath = path.join(dir, entry.name);
+            const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
 
-           if (entry.isDirectory()) {
-             loadThemeFiles(fullPath, relPath);
-           } else {
-             const content = fs.readFileSync(fullPath, 'utf-8');
-             const ext = path.extname(entry.name).toLowerCase();
+            if (entry.isDirectory()) {
+              scanPartialsFolder(fullPath, relPath);
+            } else if (entry.name.endsWith('.html')) {
+              const content = fs.readFileSync(fullPath, 'utf-8');
+              const partialName = path.basename(relPath, '.html').replace(/\\/g, '/');
+              Handlebars.registerPartial(partialName, content);
+              console.log(dim(`  Registered partial (folder): ${partialName}`));
+            }
+          }
+        }
 
-             if (ext === '.html') {
-               const templateName = path.basename(entry.name, '.html');
+        scanPartialsFolder(partialsDir);
+      }
 
-               // Register partials (files starting with _)
-               if (entry.name.startsWith('_')) {
-                 Handlebars.registerPartial(templateName, content);
-               } else {
-                 const compiled = compileTemplate(templateName, content);
-                 if (compiled) {
-                   templatesCache.set(templateName, compiled);
-                 }
-               }
-             } else {
-               const needsTemplating = content.includes('{{') || content.includes('{%');
+      // Then scan theme files
+      function loadThemeFiles(dir, relativePath = '') {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-               if (needsTemplating) {
-                 const compiled = compileTemplate(relPath, content);
-                 if (compiled) {
-                   themeAssets.set(relPath, { type: 'template', compiled });
-                 }
-               } else {
-                 themeAssets.set(relPath, { type: 'static', content });
-               }
-             }
-           }
-         }
-       }
+        for (const entry of entries) {
+          // Skip hidden files/folders
+          if (shouldIgnore(entry.name)) continue;
 
-       loadThemeFiles(themePath);
-     }
-   }
+          const fullPath = path.join(dir, entry.name);
+          const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
 
-   console.log(success(`Loaded ${templatesCache.size} templates`));
+          if (entry.isDirectory()) {
+            // Skip partials folder (already processed)
+            if (entry.name === 'partials') continue;
 
-   return { templatesCache, themeAssets, activeTheme };
- }
+            loadThemeFiles(fullPath, relPath);
+          } else {
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            const ext = path.extname(entry.name).toLowerCase();
+
+            if (ext === '.html') {
+              const templateName = path.basename(entry.name, '.html');
+
+              // Register partials (files starting with _)
+              if (entry.name.startsWith('_')) {
+                Handlebars.registerPartial(templateName, content);
+                console.log(dim(`  Registered partial (underscore): ${templateName}`));
+              } else {
+                // Check front matter for partial: true
+                const { data: frontMatter, content: templateContent } = matter(content);
+
+                if (frontMatter.partial === true) {
+                  Handlebars.registerPartial(templateName, templateContent);
+                  console.log(dim(`  Registered partial (front matter): ${templateName}`));
+                } else {
+                  const compiled = compileTemplate(templateName, content);
+                  if (compiled) {
+                    templatesCache.set(templateName, compiled);
+                  }
+                }
+              }
+            } else {
+              const needsTemplating = content.includes('{{') || content.includes('{%');
+
+              if (needsTemplating) {
+                const compiled = compileTemplate(relPath, content);
+                if (compiled) {
+                  themeAssets.set(relPath, { type: 'template', compiled });
+                }
+              } else {
+                themeAssets.set(relPath, { type: 'static', content });
+              }
+            }
+          }
+        }
+      }
+
+      loadThemeFiles(themePath);
+    }
+  }
+
+  console.log(success(`Loaded ${templatesCache.size} templates`));
+
+  return { templatesCache, themeAssets, activeTheme };
+}
 
 export function getContentSorted(contentCache) {
   return Array.from(contentCache.values()).sort((a, b) => {
