@@ -28,7 +28,8 @@ import {
   buildNavigationTree,
   normalizeToWebPath,
   processContentFile,
-  getAllTags
+  getAllTags,
+  loadEmbeddedTemplates
 } from './renderer.js';
 import { optimizeToCache, CACHE_DIR } from './build.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
@@ -264,7 +265,7 @@ async function serve404(request) {
   }
 
   if (!content404) {
-    const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+    const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
     content404 = EMBEDDED_TEMPLATES['404.html'] || 'Not Found';
   }
 
@@ -930,7 +931,7 @@ Bun.serve({
           }
         }
 
-        const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+        const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
         const assetName = path.basename(assetPath);
         if (EMBEDDED_TEMPLATES[assetName]) {
           return serveWithCache(EMBEDDED_TEMPLATES[assetName], getMimeType(assetPath), request);
@@ -1006,7 +1007,7 @@ Bun.serve({
           }
         }
 
-        const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+        const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
         if (EMBEDDED_TEMPLATES[filename]) {
           const Handlebars = await import('handlebars');
           const template = Handlebars.default.compile(EMBEDDED_TEMPLATES[filename]);

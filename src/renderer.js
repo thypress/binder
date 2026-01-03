@@ -38,6 +38,36 @@ Handlebars.registerHelper('eq', (a, b) => a === b);
 Handlebars.registerHelper('multiply', (a, b) => a * b);
 
 /**
+ * Auto-load embedded templates with generation fallback
+ * This ensures the project works immediately after clone
+ */
+export async function loadEmbeddedTemplates() {
+  try {
+    const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+    return EMBEDDED_TEMPLATES;
+  } catch (error) {
+    if (error.code === 'MODULE_NOT_FOUND' || error.code === 'ERR_MODULE_NOT_FOUND') {
+      console.log(info('Embedded templates not found, generating...'));
+
+      // Run embed-templates.js to generate the file
+      const embedPath = path.join(__dirname, 'embed-templates.js');
+      try {
+        // Import and execute the generation script
+        await import(embedPath);
+        console.log(success('Embedded templates generated'));
+      } catch (genError) {
+        throw new Error(`Failed to generate embedded templates: ${genError.message}`);
+      }
+
+      // Import again after generation
+      const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+      return EMBEDDED_TEMPLATES;
+    }
+    throw error;
+  }
+}
+
+/**
  * Check if file/folder should be ignored (starts with .)
  */
 function shouldIgnore(name) {
@@ -916,7 +946,7 @@ export async function loadTheme(themeName = null) {
     }
   }
 
-  const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+  const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
 
   function compileTemplate(name, content) {
     try {
