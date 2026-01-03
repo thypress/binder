@@ -150,3 +150,5 @@ config.json
 # THYPRESS cache and build
 .cache/
 build/
+
+templates/my-press/
