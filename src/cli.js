@@ -8,9 +8,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { EMBEDDED_TEMPLATES } from './embedded-templates.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
-import { detectContentStructure } from './renderer.js';
+import { detectContentStructure, loadEmbeddedTemplates } from './renderer.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -92,7 +91,7 @@ function parseArgs() {
 
 const { command, targetDir, openBrowser, serveAfterBuild } = parseArgs();
 
-function ensureDefaults() {
+async function ensureDefaults() {
   console.log(info(`Working directory: ${targetDir}\n`));
 
   const { contentRoot, mode, shouldInit } = detectContentStructure(targetDir);
@@ -339,6 +338,9 @@ Happy blogging! ✨
   if (!fs.existsSync(defaultThemeDir)) {
     fs.mkdirSync(defaultThemeDir, { recursive: true });
 
+    // Load embedded templates using the helper function
+    const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
+
     // Copy embedded templates to .default/
     const templates = [
       { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
@@ -371,6 +373,9 @@ Happy blogging! ✨
   if (themes.length === 0) {
     const myPressDir = path.join(templatesDir, 'my-press');
     fs.mkdirSync(myPressDir, { recursive: true });
+
+    // Load embedded templates using the helper function
+    const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
 
     // Copy defaults to my-press/
     const templates = [
@@ -450,7 +455,7 @@ function ensureGitignore() {
 }
 
 async function serve() {
-  ensureDefaults();
+  await ensureDefaults();
 
   process.env.THYPRESS_OPEN_BROWSER = openBrowser ? 'true' : 'false';
   process.chdir(targetDir);
@@ -459,7 +464,7 @@ async function serve() {
 }
 
 async function build() {
-  ensureDefaults();
+  await ensureDefaults();
 
   process.chdir(targetDir);
 
@@ -468,7 +473,7 @@ async function build() {
 }
 
 async function buildAndServe() {
-  ensureDefaults();
+  await ensureDefaults();
 
   process.chdir(targetDir);
 
