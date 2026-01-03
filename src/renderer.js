@@ -33,35 +33,9 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 export const POSTS_PER_PAGE = 10;
 const STANDARD_IMAGE_SIZES = [400, 800, 1200];
 
-// Register Handlebars helpers
+// Register minimal Handlebars helpers (no HTML building)
 Handlebars.registerHelper('eq', (a, b) => a === b);
 Handlebars.registerHelper('multiply', (a, b) => a * b);
-
-// Helper for rendering navigation tree with <details> tags
-Handlebars.registerHelper('navigationTree', function(nav) {
-  if (!nav || nav.length === 0) return '';
-
-  function renderTree(items, level = 0) {
-    let html = '';
-
-    for (const item of items) {
-      if (item.type === 'folder') {
-        html += `<details open>\n`;
-        html += `  <summary>${Handlebars.escapeExpression(item.title)}</summary>\n`;
-        html += `  <ul>\n`;
-        html += renderTree(item.children, level + 1);
-        html += `  </ul>\n`;
-        html += `</details>\n`;
-      } else if (item.type === 'file') {
-        html += `<li><a href="${item.url}">${Handlebars.escapeExpression(item.title)}</a></li>\n`;
-      }
-    }
-
-    return html;
-  }
-
-  return new Handlebars.SafeString(renderTree(nav));
-});
 
 /**
  * Detect if HTML content is a complete document vs a fragment
@@ -112,6 +86,101 @@ function detectHtmlIntent(htmlContent, frontMatter) {
 }
 
 /**
+ * Extract headings from HTML content using htmlparser2
+ */
+function extractHeadingsFromHtml(htmlContent) {
+  const headings = [];
+
+  try {
+    const dom = parseDocument(htmlContent);
+
+    function traverse(node) {
+      if (node.type === 'tag' && /^h[1-6]$/i.test(node.name)) {
+        const level = parseInt(node.name.substring(1));
+        const content = node.children
+          .filter(c => c.type === 'text')
+          .map(c => c.data)
+          .join('')
+          .trim();
+        const slug = node.attribs?.id || '';
+
+        if (content) {
+          headings.push({ level, content, slug });
+        }
+      }
+
+      if (node.children) {
+        node.children.forEach(traverse);
+      }
+    }
+
+    traverse(dom);
+  } catch (error) {
+    console.error(errorMsg(`Error extracting headings from HTML: ${error.message}`));
+  }
+
+  return headings;
+}
+
+/**
+ * Build nested TOC structure from flat headings array
+ * Returns pure data structure - NO HTML
+ */
+function buildTocStructure(headings, minLevel = 2, maxLevel = 4) {
+  if (!headings || headings.length === 0) return [];
+
+  const toc = [];
+  const stack = [{ children: toc, level: 0 }];
+
+  for (const heading of headings) {
+    // Skip h1 (page title) and levels outside range
+    if (heading.level < minLevel || heading.level > maxLevel) continue;
+    if (!heading.slug) continue; // Skip headings without IDs
+
+    // Pop stack until we find the right parent level
+    while (stack.length > 1 && stack[stack.length - 1].level >= heading.level) {
+      stack.pop();
+    }
+
+    const item = {
+      level: heading.level,
+      content: heading.content,
+      slug: heading.slug,
+      children: []
+    };
+
+    stack[stack.length - 1].children.push(item);
+    stack.push(item);
+  }
+
+  return toc;
+}
+
+/**
+ * Hook into markdown-it renderer to capture heading metadata
+ */
+function setupHeadingExtractor(md) {
+  const originalHeadingOpen = md.renderer.rules.heading_open || function(tokens, idx, options, env, self) {
+    return self.renderToken(tokens, idx, options);
+  };
+
+  md.renderer.rules.heading_open = function(tokens, idx, options, env, self) {
+    const token = tokens[idx];
+    const level = parseInt(token.tag.substring(1)); // h1 -> 1, h2 -> 2
+    const nextToken = tokens[idx + 1];
+    const content = nextToken && nextToken.type === 'inline' ? nextToken.content : '';
+    const slug = token.attrGet('id') || '';
+
+    if (!env.headings) env.headings = [];
+    env.headings.push({ level, content, slug });
+
+    return originalHeadingOpen(tokens, idx, options, env, self);
+  };
+}
+
+setupHeadingExtractor(md);
+
+/**
  * Process a single content file (MD, TXT, or HTML)
  * Returns { slug, content, imageReferences }
  */
@@ -137,6 +206,14 @@ export function processContentFile(fullPath, relativePath, mode, contentDir) {
       section = 'posts';
     }
 
+    // Extract TOC from HTML fragments
+    let toc = [];
+    let headings = [];
+    if (intent.mode === 'templated') {
+      headings = extractHeadingsFromHtml(htmlContent);
+      toc = buildTocStructure(headings);
+    }
+
     return {
       slug,
       content: {
@@ -157,7 +234,9 @@ export function processContentFile(fullPath, relativePath, mode, contentDir) {
         type: 'html',
         wordCount: 0,
         readingTime: 0,
-        section: section
+        section: section,
+        toc: toc,
+        headings: headings
       },
       imageReferences: []
     };
@@ -169,7 +248,8 @@ export function processContentFile(fullPath, relativePath, mode, contentDir) {
   const env = {
     postRelativePath: webPath,
     referencedImages: [],
-    contentDir: contentDir
+    contentDir: contentDir,
+    headings: []
   };
 
   const renderedHtml = isMarkdown ? md.render(content, env) : `<pre>${content}</pre>`;
@@ -199,6 +279,9 @@ export function processContentFile(fullPath, relativePath, mode, contentDir) {
     ogImage = `/${firstImg.urlBase}${firstImg.basename}-${ogSize}-${firstImg.hash}.jpg`;
   }
 
+  // Build TOC structure for markdown
+  const toc = isMarkdown ? buildTocStructure(env.headings) : [];
+
   return {
     slug,
     content: {
@@ -219,7 +302,9 @@ export function processContentFile(fullPath, relativePath, mode, contentDir) {
       wordCount: wordCount,
       readingTime: readingTime,
       section: section,
-      type: isMarkdown ? 'markdown' : 'text'
+      type: isMarkdown ? 'markdown' : 'text',
+      toc: toc,
+      headings: env.headings
     },
     imageReferences: env.referencedImages
   };
@@ -540,6 +625,7 @@ export function generateUrl(relativePath, mode, section = null) {
 
 /**
  * Build navigation tree
+ * Returns pure data structure - NO HTML
  */
 export function buildNavigationTree(contentRoot, contentCache = new Map(), mode = 'structured') {
   const navigation = [];
@@ -756,102 +842,115 @@ export function selectTemplate(content, templates, defaultTemplate = 'post') {
 /**
  * Load theme from templates directory
  */
-export async function loadTheme(themeName = null) {
-  const templatesDir = path.join(process.cwd(), 'templates');
-  const templatesCache = new Map();
-  const themeAssets = new Map();
+ export async function loadTheme(themeName = null) {
+   const templatesDir = path.join(process.cwd(), 'templates');
+   const templatesCache = new Map();
+   const themeAssets = new Map();
 
-  let activeTheme = themeName;
+   let activeTheme = themeName;
 
-  if (!activeTheme) {
-    if (fs.existsSync(templatesDir)) {
-      const themes = fs.readdirSync(templatesDir)
-        .filter(f => {
-          const fullPath = path.join(templatesDir, f);
-          return !f.startsWith('.') && fs.statSync(fullPath).isDirectory();
-        });
+   if (!activeTheme) {
+     if (fs.existsSync(templatesDir)) {
+       const themes = fs.readdirSync(templatesDir)
+         .filter(f => {
+           const fullPath = path.join(templatesDir, f);
+           return !f.startsWith('.') && fs.statSync(fullPath).isDirectory();
+         });
 
-      if (themes.length === 1) {
-        activeTheme = themes[0];
-      } else if (themes.includes('my-press')) {
-        activeTheme = 'my-press';
-      }
-    }
-  }
+       if (themes.length === 1) {
+         activeTheme = themes[0];
+       } else if (themes.includes('my-press')) {
+         activeTheme = 'my-press';
+       }
+     }
+   }
 
-  const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+   const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
 
-  function compileTemplate(name, content) {
-    try {
-      return Handlebars.compile(content);
-    } catch (error) {
-      console.error(errorMsg(`Failed to compile template '${name}': ${error.message}`));
-      return null;
-    }
-  }
+   function compileTemplate(name, content) {
+     try {
+       return Handlebars.compile(content);
+     } catch (error) {
+       console.error(errorMsg(`Failed to compile template '${name}': ${error.message}`));
+       return null;
+     }
+   }
 
-  for (const [name, content] of Object.entries(EMBEDDED_TEMPLATES)) {
-    if (name.endsWith('.html')) {
-      const templateName = name.replace('.html', '');
-      const compiled = compileTemplate(templateName, content);
-      if (compiled) {
-        templatesCache.set(templateName, compiled);
-      }
-    }
-  }
+   // Load embedded templates first
+   for (const [name, content] of Object.entries(EMBEDDED_TEMPLATES)) {
+     if (name.endsWith('.html')) {
+       const templateName = name.replace('.html', '');
 
-  if (activeTheme) {
-    const themePath = path.join(templatesDir, activeTheme);
+       // Register partials (files starting with _)
+       if (name.startsWith('_')) {
+         Handlebars.registerPartial(templateName, content);
+       } else {
+         const compiled = compileTemplate(templateName, content);
+         if (compiled) {
+           templatesCache.set(templateName, compiled);
+         }
+       }
+     }
+   }
 
-    if (fs.existsSync(themePath)) {
-      console.log(success(`Loading theme: ${activeTheme}`));
+   if (activeTheme) {
+     const themePath = path.join(templatesDir, activeTheme);
 
-      function loadThemeFiles(dir, relativePath = '') {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
+     if (fs.existsSync(themePath)) {
+       console.log(success(`Loading theme: ${activeTheme}`));
 
-        for (const entry of entries) {
-          if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+       function loadThemeFiles(dir, relativePath = '') {
+         const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-          const fullPath = path.join(dir, entry.name);
-          const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+         for (const entry of entries) {
+           // FIXED: Only skip hidden files (.), allow _ files for partials
+           if (entry.name.startsWith('.')) continue;
 
-          if (entry.isDirectory()) {
-            loadThemeFiles(fullPath, relPath);
-          } else {
-            const content = fs.readFileSync(fullPath, 'utf-8');
-            const ext = path.extname(entry.name).toLowerCase();
+           const fullPath = path.join(dir, entry.name);
+           const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
 
-            if (ext === '.html') {
-              const templateName = path.basename(entry.name, '.html');
-              const compiled = compileTemplate(templateName, content);
-              if (compiled) {
-                templatesCache.set(templateName, compiled);
-                Handlebars.registerPartial(templateName, content);
-              }
-            } else {
-              const needsTemplating = content.includes('{{') || content.includes('{%');
+           if (entry.isDirectory()) {
+             loadThemeFiles(fullPath, relPath);
+           } else {
+             const content = fs.readFileSync(fullPath, 'utf-8');
+             const ext = path.extname(entry.name).toLowerCase();
 
-              if (needsTemplating) {
-                const compiled = compileTemplate(relPath, content);
-                if (compiled) {
-                  themeAssets.set(relPath, { type: 'template', compiled });
-                }
-              } else {
-                themeAssets.set(relPath, { type: 'static', content });
-              }
-            }
-          }
-        }
-      }
+             if (ext === '.html') {
+               const templateName = path.basename(entry.name, '.html');
 
-      loadThemeFiles(themePath);
-    }
-  }
+               // Register partials (files starting with _)
+               if (entry.name.startsWith('_')) {
+                 Handlebars.registerPartial(templateName, content);
+               } else {
+                 const compiled = compileTemplate(templateName, content);
+                 if (compiled) {
+                   templatesCache.set(templateName, compiled);
+                 }
+               }
+             } else {
+               const needsTemplating = content.includes('{{') || content.includes('{%');
 
-  console.log(success(`Loaded ${templatesCache.size} templates`));
+               if (needsTemplating) {
+                 const compiled = compileTemplate(relPath, content);
+                 if (compiled) {
+                   themeAssets.set(relPath, { type: 'template', compiled });
+                 }
+               } else {
+                 themeAssets.set(relPath, { type: 'static', content });
+               }
+             }
+           }
+         }
+       }
 
-  return { templatesCache, themeAssets, activeTheme };
-}
+       loadThemeFiles(themePath);
+     }
+   }
+
+   console.log(success(`Loaded ${templatesCache.size} templates`));
+
+   return { templatesCache, themeAssets, activeTheme };
+ }
 
 export function getContentSorted(contentCache) {
   return Array.from(contentCache.values()).sort((a, b) => {
@@ -981,6 +1080,7 @@ export function renderContent(content, slug, templates, navigation, siteConfig =
   }
 
   const htmlToWrap = content.renderedHtml || content.content;
+  const showToc = content.toc && content.toc.length > 0;
 
   return template({
     content: htmlToWrap,
@@ -1004,7 +1104,9 @@ export function renderContent(content, slug, templates, navigation, siteConfig =
     readingTime: content.readingTime,
     frontMatter: content.frontMatter,
     prevPost: prevContent,
-    nextPost: nextContent
+    nextPost: nextContent,
+    toc: content.toc || [],
+    showToc: showToc
   });
 }
 
