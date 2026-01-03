@@ -1,0 +1,24 @@
+<!-- SPDX-License-Identifier: MPL-2.0
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+Recursive partial for rendering table of contents tree.
+Customize HTML structure here - change to <div> instead of <ul>,
+use <nav> tags, add classes, etc. All presentation is in your control.
+-->
+
+<ul>
+{{#each items}}
+  <li>
+    <a href="#{{slug}}" data-heading-id="{{slug}}">{{content}}</a>
+    {{#if children.length}}
+      <details open>
+        <summary></summary>
+        {{> _toc-tree items=children}}
+      </details>
+    {{/if}}
+  </li>
+{{/each}}
+</ul>

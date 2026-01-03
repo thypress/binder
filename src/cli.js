@@ -103,21 +103,25 @@ function ensureDefaults() {
     fs.mkdirSync(postsDir, { recursive: true });
     console.log(success(`Created ${contentRoot}`));
 
-    // Create example post
+    // Create example post with proper heading structure for TOC demo
     const examplePost = path.join(postsDir, '2024-01-01-welcome.md');
     fs.writeFileSync(examplePost, `---
 title: Welcome to THYPRESS!
 createdAt: 2024-01-01
 updatedAt: 2024-01-15
-tags: [blogging, markdown]
-description: Your first post with THYPRESS
+tags: [blogging, markdown, documentation]
+description: Your first post with THYPRESS - learn about features and get started
 ---
 
 # Welcome to THYPRESS!
 
 This is your first post. Create more \`.md\` files in \`content/posts/\`.
 
-## Front Matter
+## Getting Started
+
+THYPRESS is a **static site generator** with a built-in HTTP server. It's designed for speed, simplicity, and flexibility.
+
+### Writing Content
 
 Add YAML front matter to your posts:
 
@@ -131,19 +135,122 @@ description: A short description
 ---
 \`\`\`
 
-## Features
+### File Formats
 
-- Write in Markdown, plain text, or HTML
-- Organize with sections and tags
-- Folder-based navigation
-- Client-side search (MiniSearch)
-- Auto-generated RSS & sitemap
-- Image optimization (WebP + responsive)
-- Syntax highlighting
-- Blazing fast hot reload
-- HTTP caching + compression
+THYPRESS supports three content types:
 
-Happy blogging!
+- **Markdown** (\`.md\`) - Full CommonMark + GFM support
+- **Plain text** (\`.txt\`) - Rendered in \`<pre>\` tags
+- **HTML** (\`.html\`) - Complete documents or fragments
+
+## Core Features
+
+### Table of Contents
+
+Notice the **"On This Page"** sidebar on the right? It's auto-generated from your heading structure (H2-H4). The current section is highlighted as you scroll.
+
+### Navigation
+
+The left sidebar shows your site structure based on your \`content/\` folder hierarchy.
+
+### Search
+
+Client-side search with MiniSearch. Try the search box on the homepage.
+
+### Image Optimization
+
+Images are automatically optimized to WebP + JPEG with responsive sizes:
+
+\`\`\`markdown
+![Alt text](./photo.jpg)
+\`\`\`
+
+Becomes:
+- 400w, 800w, 1200w responsive variants
+- WebP + JPEG fallbacks
+- Lazy loading + async decoding
+
+### Syntax Highlighting
+
+Code blocks get automatic syntax highlighting (140+ languages):
+
+\`\`\`javascript
+function greet(name) {
+  console.log(\`Hello, \${name}!\`);
+}
+\`\`\`
+
+\`\`\`python
+def greet(name):
+    print(f"Hello, {name}!")
+\`\`\`
+
+### SEO & Performance
+
+Every page includes:
+- Meta descriptions
+- Open Graph tags
+- Twitter cards
+- JSON-LD structured data
+- Canonical URLs
+- Sitemap + RSS feed
+
+## Content Organization
+
+### Structured Mode
+
+The recommended way to organize content:
+
+\`\`\`
+content/
+├── posts/           → Blog posts
+├── docs/            → Documentation
+├── guides/          → Tutorial guides
+└── about.md         → Static pages
+\`\`\`
+
+### URL Generation
+
+Your folder structure becomes your URL structure:
+
+- \`content/posts/hello.md\` → \`/posts/hello/\`
+- \`content/docs/api.md\` → \`/docs/api/\`
+- \`content/about.md\` → \`/about/\`
+
+## Deployment Options
+
+### Option A: Static Hosting
+
+Build and deploy to any CDN:
+
+\`\`\`bash
+thypress build
+# Upload /build to Netlify, Vercel, GitHub Pages, etc.
+\`\`\`
+
+### Option B: Server Mode
+
+Run as HTTP server on VPS:
+
+\`\`\`bash
+thypress build --serve
+# Production server on port 3009
+\`\`\`
+
+## Next Steps
+
+1. **Edit this file**: \`content/posts/2024-01-01-welcome.md\`
+2. **Create new posts**: Add \`.md\` files to \`content/posts/\`
+3. **Customize theme**: Edit templates in \`templates/my-press/\`
+4. **Configure site**: Update \`config.json\`
+
+## Documentation
+
+- **GitHub**: [github.com/thypress/thypress](https://github.com/thypress/thypress)
+- **Issues**: Report bugs or request features
+- **Discussions**: Ask questions and share your site
+
+Happy blogging! ✨
 `);
     console.log(success(`Created example post\n`));
   }
@@ -163,7 +270,11 @@ Happy blogging!
       { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] },
       { name: 'robots.txt', content: EMBEDDED_TEMPLATES['robots.txt'] },
       { name: 'llms.txt', content: EMBEDDED_TEMPLATES['llms.txt'] },
-      { name: '404.html', content: EMBEDDED_TEMPLATES['404.html'] }
+      { name: '404.html', content: EMBEDDED_TEMPLATES['404.html'] },
+      { name: '_sidebar-nav.html', content: EMBEDDED_TEMPLATES['_sidebar-nav.html'] },
+      { name: '_sidebar-toc.html', content: EMBEDDED_TEMPLATES['_sidebar-toc.html'] },
+      { name: '_nav-tree.html', content: EMBEDDED_TEMPLATES['_nav-tree.html'] },
+      { name: '_toc-tree.html', content: EMBEDDED_TEMPLATES['_toc-tree.html'] }
     ];
 
     templates.forEach(({ name, content }) => {
@@ -189,7 +300,11 @@ Happy blogging!
       { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
       { name: 'post.html', content: EMBEDDED_TEMPLATES['post.html'] },
       { name: 'tag.html', content: EMBEDDED_TEMPLATES['tag.html'] },
-      { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] }
+      { name: 'style.css', content: EMBEDDED_TEMPLATES['style.css'] },
+      { name: '_sidebar-nav.html', content: EMBEDDED_TEMPLATES['_sidebar-nav.html'] },
+      { name: '_sidebar-toc.html', content: EMBEDDED_TEMPLATES['_sidebar-toc.html'] },
+      { name: '_nav-tree.html', content: EMBEDDED_TEMPLATES['_nav-tree.html'] },
+      { name: '_toc-tree.html', content: EMBEDDED_TEMPLATES['_toc-tree.html'] }
     ];
 
     templates.forEach(({ name, content }) => {

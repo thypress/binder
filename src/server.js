@@ -439,11 +439,23 @@ function resolveHomepage(request) {
   return serveWithCache(html, 'text/html; charset=utf-8', request);
 }
 
-// Initialize
+// Initialize - FIXED ORDER
 console.log(bright('Initializing server...\n'));
-await reloadContent();
+
+// Load content first (metadata only, no rendering)
+const initialLoad = loadAllContent();
+contentCache = initialLoad.contentCache;
+slugMap = initialLoad.slugMap;
+navigation = initialLoad.navigation;
+imageReferences = initialLoad.imageReferences;
+brokenImages = initialLoad.brokenImages;
+contentMode = initialLoad.mode;
+contentRoot = initialLoad.contentRoot;
+
+// Load theme second (this will trigger pre-rendering with templates available)
 await reloadTheme();
 
+// Optimize images after everything is loaded
 if (!isOptimizingImages && imageReferences.size > 0) {
   isOptimizingImages = true;
   await optimizeToCache(imageReferences, brokenImages);

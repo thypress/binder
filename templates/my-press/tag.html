@@ -16,12 +16,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 </head>
 <body>
   {{#if navigation}}
-  <aside>
-    <h2>Navigation</h2>
-    <nav>
-      {{{navigationTree navigation}}}
-    </nav>
-  </aside>
+    {{> _sidebar-nav items=navigation showWrapper=true}}
   {{/if}}
 
   <main>

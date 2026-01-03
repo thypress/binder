@@ -21,7 +21,11 @@ const templates = {
   'style.css': fs.readFileSync(path.join(templatesDir, 'style.css'), 'utf-8'),
   'robots.txt': fs.readFileSync(path.join(templatesDir, 'robots.txt'), 'utf-8'),
   'llms.txt': fs.readFileSync(path.join(templatesDir, 'llms.txt'), 'utf-8'),
-  '404.html': fs.readFileSync(path.join(templatesDir, '404.html'), 'utf-8')
+  '404.html': fs.readFileSync(path.join(templatesDir, '404.html'), 'utf-8'),
+  '_sidebar-nav.html': fs.readFileSync(path.join(templatesDir, '_sidebar-nav.html'), 'utf-8'),
+  '_sidebar-toc.html': fs.readFileSync(path.join(templatesDir, '_sidebar-toc.html'), 'utf-8'),
+  '_nav-tree.html': fs.readFileSync(path.join(templatesDir, '_nav-tree.html'), 'utf-8'),
+  '_toc-tree.html': fs.readFileSync(path.join(templatesDir, '_toc-tree.html'), 'utf-8')
 };
 
 const output = `// AUTO-GENERATED - DO NOT EDIT
