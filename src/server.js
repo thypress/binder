@@ -21,6 +21,8 @@ import {
   renderContentList,
   renderContent,
   renderTagPage,
+  renderCategoryPage,
+  renderSeriesPage,
   generateRSS,
   generateSitemap,
   generateSearchIndex,
@@ -29,7 +31,10 @@ import {
   normalizeToWebPath,
   processContentFile,
   getAllTags,
-  loadEmbeddedTemplates
+  getAllCategories,
+  getAllSeries,
+  loadEmbeddedTemplates,
+  slugify
 } from './renderer.js';
 import { optimizeToCache, CACHE_DIR } from './build.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
@@ -42,16 +47,13 @@ const DEBOUNCE_DELAY = 500;
 const gzip = promisify(zlib.gzip);
 const brotliCompress = promisify(zlib.brotliCompress);
 
-/**
- * Check if file/folder should be ignored (starts with .)
- */
+// FEATURE 1: WebSocket for live reload
+const liveReloadClients = new Set();
+
 function shouldIgnore(name) {
   return name.startsWith('.');
 }
 
-/**
- * Check if path contains drafts folder
- */
 function isInDraftsFolder(filename) {
   const parts = filename.split(path.sep);
   return parts.includes('drafts');
@@ -70,6 +72,48 @@ let brokenImages = [];
 let contentMode = 'structured';
 let contentRoot = '';
 
+// FEATURE 4: Load redirect rules
+let redirectRules = new Map();
+
+function loadRedirects() {
+  const redirectsPath = path.join(process.cwd(), 'redirects.json');
+
+  if (fsSync.existsSync(redirectsPath)) {
+    try {
+      const redirects = JSON.parse(fsSync.readFileSync(redirectsPath, 'utf-8'));
+      redirectRules = new Map(Object.entries(redirects));
+      console.log(success(`Loaded ${redirectRules.size} redirect rules`));
+    } catch (error) {
+      console.error(errorMsg(`Failed to load redirects: ${error.message}`));
+    }
+  }
+}
+
+function matchRedirect(path) {
+  for (const [from, to] of redirectRules) {
+    // Exact match
+    if (from === path) {
+      return to;
+    }
+
+    // Pattern match with :param
+    const pattern = from.replace(/:\w+/g, '([^/]+)');
+    const regex = new RegExp(`^${pattern}$`);
+    const match = path.match(regex);
+
+    if (match) {
+      let redirectTo = to;
+      const params = from.match(/:\w+/g) || [];
+      params.forEach((param, i) => {
+        redirectTo = redirectTo.replace(param, match[i + 1]);
+      });
+      return redirectTo;
+    }
+  }
+
+  return null;
+}
+
 // Performance caches
 const renderedCache = new Map();
 const precompressedCache = new Map();
@@ -83,12 +127,12 @@ let isBuildingStatic = false;
 let isOptimizingImages = false;
 let optimizeDebounceTimer = null;
 
-// Metrics - FIXED: Split into meaningful categories
+// Metrics
 const metrics = {
   requests: 0,
-  httpCacheHits: 0,      // HTTP 304 (ETag match)
-  serverCacheHits: 0,    // HTTP 200 (served from cache)
-  serverRenderHits: 0,   // HTTP 200 (had to render)
+  httpCacheHits: 0,
+  serverCacheHits: 0,
+  serverRenderHits: 0,
   responseTimes: []
 };
 
@@ -213,7 +257,6 @@ async function serveWithCache(content, mimeType, request, options = {}) {
   return new Response(finalContent, { headers });
 }
 
-// FIXED: Now properly tracks HTTP 304 vs cached serving
 function servePrecompressed(slug, request, mimeType = 'text/html; charset=utf-8') {
   const acceptEncoding = request.headers.get('accept-encoding') || '';
   const ifNoneMatch = request.headers.get('if-none-match');
@@ -225,7 +268,7 @@ function servePrecompressed(slug, request, mimeType = 'text/html; charset=utf-8'
   if (!cached) return null;
 
   if (ifNoneMatch === cached.etag) {
-    metrics.httpCacheHits++;  // HTTP 304
+    metrics.httpCacheHits++;
     return new Response(null, {
       status: 304,
       headers: {
@@ -235,7 +278,7 @@ function servePrecompressed(slug, request, mimeType = 'text/html; charset=utf-8'
     });
   }
 
-  metrics.serverCacheHits++;  // HTTP 200 from cache
+  metrics.serverCacheHits++;
   return new Response(cached.content, {
     headers: {
       'Content-Type': mimeType,
@@ -320,6 +363,26 @@ async function preRenderAllContent() {
     }
   }
 
+  const allCategories = getAllCategories(contentCache);
+  for (const category of allCategories) {
+    try {
+      const html = renderCategoryPage(contentCache, category, templatesCache, navigation);
+      renderedCache.set(`__category_${category}`, html);
+    } catch (error) {
+      console.error(errorMsg(`Failed to pre-render category ${category}: ${error.message}`));
+    }
+  }
+
+  const allSeries = getAllSeries(contentCache);
+  for (const series of allSeries) {
+    try {
+      const html = renderSeriesPage(contentCache, series, templatesCache, navigation);
+      renderedCache.set(`__series_${slugify(series)}`, html);
+    } catch (error) {
+      console.error(errorMsg(`Failed to pre-render series ${series}: ${error.message}`));
+    }
+  }
+
   console.log(success(`Pre-rendered ${renderedCache.size} pages`));
 }
 
@@ -370,6 +433,9 @@ async function reloadContent() {
   await preCompressContent();
 
   scheduleImageOptimization();
+
+  // FEATURE 1: Notify live reload clients
+  broadcastReload();
 }
 
 function invalidateDynamicCaches() {
@@ -401,6 +467,43 @@ async function reloadTheme() {
 
   await preRenderAllContent();
   await preCompressContent();
+
+  // FEATURE 1: Notify live reload clients
+  broadcastReload();
+}
+
+// FEATURE 1: Live reload broadcast
+function broadcastReload() {
+  liveReloadClients.forEach(ws => {
+    try {
+      ws.send('reload');
+    } catch (error) {
+      // Client disconnected
+      liveReloadClients.delete(ws);
+    }
+  });
+}
+
+// FEATURE 1: Inject live reload script
+function injectLiveReloadScript(html) {
+  const script = `
+<script>
+(function() {
+  const ws = new WebSocket('ws://' + location.host + '/__live_reload');
+  ws.onmessage = function(e) {
+    if (e.data === 'reload') {
+      console.log('[THYPRESS] Reloading page...');
+      location.reload();
+    }
+  };
+  ws.onerror = function() {
+    console.log('[THYPRESS] Live reload disconnected');
+  };
+})();
+</script>
+</body>`;
+
+  return html.replace('</body>', script);
 }
 
 function loadSingleContent(filename) {
@@ -409,9 +512,8 @@ function loadSingleContent(filename) {
 
   try {
     const fullPath = path.join(contentRoot, filename);
-    const result = processContentFile(fullPath, filename, contentMode, contentRoot);
+    const result = processContentFile(fullPath, filename, contentMode, contentRoot, siteConfig);
 
-    // Skip if null (draft)
     if (!result) {
       console.log(dim(`Skipped draft: ${path.basename(filename)}`));
       return;
@@ -431,28 +533,26 @@ function loadSingleContent(filename) {
   }
 }
 
-// FIXED: Use three-tier cache (precompressed → rendered → render fresh)
 function resolveHomepage(request) {
   if (siteConfig.index) {
     const customContent = contentCache.get(siteConfig.index);
     if (customContent) {
-      // Tier 1: Precompressed
       const precompressed = servePrecompressed(siteConfig.index, request);
       if (precompressed) return precompressed;
 
-      // Tier 2: Rendered cache
       const preRendered = renderedCache.get(siteConfig.index);
       if (preRendered) {
         metrics.serverCacheHits++;
-        return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+        const html = injectLiveReloadScript(preRendered);
+        return serveWithCache(html, 'text/html; charset=utf-8', request);
       }
 
-      // Tier 3: Render fresh
       metrics.serverRenderHits++;
       if (customContent.type === 'html' && customContent.renderedHtml !== null) {
-        return serveWithCache(customContent.renderedHtml, 'text/html; charset=utf-8', request);
+        const html = injectLiveReloadScript(customContent.renderedHtml);
+        return serveWithCache(html, 'text/html; charset=utf-8', request);
       }
-      const html = renderContent(customContent, customContent.slug, templatesCache, navigation, siteConfig, contentCache);
+      const html = injectLiveReloadScript(renderContent(customContent, customContent.slug, templatesCache, navigation, siteConfig, contentCache));
       renderedCache.set(siteConfig.index, html);
       return serveWithCache(html, 'text/html; charset=utf-8', request);
     }
@@ -460,50 +560,45 @@ function resolveHomepage(request) {
 
   const indexContent = contentCache.get('index');
   if (indexContent) {
-    // Tier 1: Precompressed
     const precompressed = servePrecompressed('index', request);
     if (precompressed) return precompressed;
 
-    // Tier 2: Rendered cache
     const preRendered = renderedCache.get('index');
     if (preRendered) {
       metrics.serverCacheHits++;
-      return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+      const html = injectLiveReloadScript(preRendered);
+      return serveWithCache(html, 'text/html; charset=utf-8', request);
     }
 
-    // Tier 3: Render fresh
     metrics.serverRenderHits++;
     if (indexContent.type === 'html' && indexContent.renderedHtml !== null) {
-      return serveWithCache(indexContent.renderedHtml, 'text/html; charset=utf-8', request);
+      const html = injectLiveReloadScript(indexContent.renderedHtml);
+      return serveWithCache(html, 'text/html; charset=utf-8', request);
     }
-    const html = renderContent(indexContent, 'index', templatesCache, navigation, siteConfig, contentCache);
+    const html = injectLiveReloadScript(renderContent(indexContent, 'index', templatesCache, navigation, siteConfig, contentCache));
     renderedCache.set('index', html);
     return serveWithCache(html, 'text/html; charset=utf-8', request);
   }
 
-  // Default index listing
-  // Tier 1: Precompressed
   const precompressed = servePrecompressed('__index_1', request);
   if (precompressed) return precompressed;
 
-  // Tier 2: Rendered cache
   const preRendered = renderedCache.get('__index_1');
   if (preRendered) {
     metrics.serverCacheHits++;
-    return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+    const html = injectLiveReloadScript(preRendered);
+    return serveWithCache(html, 'text/html; charset=utf-8', request);
   }
 
-  // Tier 3: Render fresh
   metrics.serverRenderHits++;
-  const html = renderContentList(contentCache, 1, templatesCache, navigation, siteConfig);
+  const html = injectLiveReloadScript(renderContentList(contentCache, 1, templatesCache, navigation, siteConfig));
   renderedCache.set('__index_1', html);
   return serveWithCache(html, 'text/html; charset=utf-8', request);
 }
 
-// Initialize - FIXED ORDER
+// Initialize
 console.log(bright('Initializing server...\n'));
 
-// Load content first (metadata only, no rendering)
 const initialLoad = loadAllContent();
 contentCache = initialLoad.contentCache;
 slugMap = initialLoad.slugMap;
@@ -513,10 +608,9 @@ brokenImages = initialLoad.brokenImages;
 contentMode = initialLoad.mode;
 contentRoot = initialLoad.contentRoot;
 
-// Load theme second (this will trigger pre-rendering with templates available)
 await reloadTheme();
+loadRedirects();
 
-// Optimize images after everything is loaded
 if (!isOptimizingImages && imageReferences.size > 0) {
   isOptimizingImages = true;
   await optimizeToCache(imageReferences, brokenImages);
@@ -528,10 +622,8 @@ try {
   watch(contentRoot, { recursive: true }, async (event, filename) => {
     if (!filename) return;
 
-    // Skip hidden files/folders
     if (shouldIgnore(path.basename(filename))) return;
 
-    // Skip drafts folders
     if (isInDraftsFolder(filename)) return;
 
     const webPath = normalizeToWebPath(filename);
@@ -593,7 +685,6 @@ try {
     watch(themesDir, { recursive: true }, async (event, filename) => {
       if (!filename) return;
 
-      // Skip hidden files/folders
       if (shouldIgnore(path.basename(filename))) return;
 
       console.log(info(`Theme: ${event} - ${filename}`));
@@ -603,7 +694,7 @@ try {
   }
 } catch (error) {}
 
-// Watch config
+// Watch config and redirects
 try {
   const configPath = path.join(process.cwd(), 'config.json');
   if (fsSync.existsSync(configPath)) {
@@ -612,6 +703,15 @@ try {
       await reloadTheme();
       invalidateDynamicCaches();
       console.log(success('Config reloaded'));
+      broadcastReload();
+    });
+  }
+
+  const redirectsPath = path.join(process.cwd(), 'redirects.json');
+  if (fsSync.existsSync(redirectsPath)) {
+    watch(redirectsPath, async (event, filename) => {
+      loadRedirects();
+      console.log(success('Redirects reloaded'));
     });
   }
 } catch (error) {}
@@ -646,21 +746,61 @@ async function findAvailablePort(startPort) {
   throw new Error('No available port');
 }
 
-const port = await findAvailablePort(START_PORT);
+// FIX 17: PORT environment variable support
+let port;
 
-if (port !== START_PORT) {
-  console.log(info(`Port ${START_PORT} in use, using ${port} instead\n`));
+if (process.env.PORT) {
+  port = parseInt(process.env.PORT, 10);
+
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error(errorMsg(`Invalid PORT value: ${process.env.PORT}`));
+    console.log(dim('PORT must be a number between 1-65535'));
+    process.exit(1);
+  }
+
+  try {
+    const testServer = Bun.serve({
+      port,
+      fetch() { return new Response('test'); }
+    });
+    testServer.stop();
+    console.log(info(`Using PORT from environment: ${port}`));
+  } catch (error) {
+    console.error(errorMsg(`Port ${port} is already in use`));
+    console.log(info('Remove PORT env var to auto-detect available port'));
+    process.exit(1);
+  }
+} else {
+  port = await findAvailablePort(START_PORT);
+
+  if (port !== START_PORT) {
+    console.log(info(`Port ${START_PORT} in use, using ${port} instead\n`));
+  }
 }
 
 Bun.serve({
   port,
-  async fetch(request) {
+  async fetch(request, server) {
     const startTime = Date.now();
     const url = new URL(request.url);
     const route = url.pathname;
 
     try {
       metrics.requests++;
+
+      // FEATURE 1: WebSocket upgrade for live reload
+      if (route === '/__live_reload') {
+        if (server.upgrade(request)) {
+          return;
+        }
+        return new Response('WebSocket upgrade failed', { status: 400 });
+      }
+
+      // FEATURE 4: Redirect handling
+      const redirectTo = matchRedirect(route);
+      if (redirectTo) {
+        return Response.redirect(new URL(redirectTo, url.origin).toString(), 301);
+      }
 
       // Admin page
       if (route === '/__thypress/' || route === '/__thypress') {
@@ -785,6 +925,8 @@ Bun.serve({
     <p><strong>Pre-compressed:</strong> ${precompressedCache.size / 2} pages × 2 formats</p>
     <p><strong>Images cached:</strong> ${imageReferences.size} files with images</p>
     <p><strong>Static cache:</strong> ${staticAssetCache.size} files (${(currentCacheSize / 1024 / 1024).toFixed(2)} MB)</p>
+    <p><strong>Redirect rules:</strong> ${redirectRules.size}</p>
+    <p><strong>Live reload:</strong> ${liveReloadClients.size} connected clients</p>
     <p><strong>Server:</strong> http://localhost:${port}</p>
   </div>
 
@@ -1028,7 +1170,7 @@ Bun.serve({
         return serveWithCache(sitemap, 'application/xml; charset=utf-8', request);
       }
 
-      // robots.txt and llms.txt (templated)
+      // robots.txt and llms.txt
       if (route === '/robots.txt' || route === '/llms.txt') {
         const filename = route.substring(1);
 
@@ -1058,26 +1200,24 @@ Bun.serve({
         }
       }
 
-      // FIXED: Tag pages - three-tier cache
+      // Tag pages
       if (route.startsWith('/tag/')) {
         const tag = route.substring(5).replace(/\/$/, '');
         const cacheKey = `__tag_${tag}`;
 
-        // Tier 1: Precompressed
         const precompressed = servePrecompressed(cacheKey, request);
         if (precompressed) return precompressed;
 
-        // Tier 2: Rendered cache
         const preRendered = renderedCache.get(cacheKey);
         if (preRendered) {
           metrics.serverCacheHits++;
-          return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+          const html = injectLiveReloadScript(preRendered);
+          return serveWithCache(html, 'text/html; charset=utf-8', request);
         }
 
-        // Tier 3: Render fresh
         try {
           metrics.serverRenderHits++;
-          const html = renderTagPage(contentCache, tag, templatesCache, navigation);
+          const html = injectLiveReloadScript(renderTagPage(contentCache, tag, templatesCache, navigation));
           renderedCache.set(cacheKey, html);
           return serveWithCache(html, 'text/html; charset=utf-8', request);
         } catch (error) {
@@ -1085,28 +1225,81 @@ Bun.serve({
         }
       }
 
-      // FIXED: Pagination routes - three-tier cache
+      // Category pages
+      if (route.startsWith('/category/')) {
+        const category = route.substring(10).replace(/\/$/, '');
+        const cacheKey = `__category_${category}`;
+
+        const precompressed = servePrecompressed(cacheKey, request);
+        if (precompressed) return precompressed;
+
+        const preRendered = renderedCache.get(cacheKey);
+        if (preRendered) {
+          metrics.serverCacheHits++;
+          const html = injectLiveReloadScript(preRendered);
+          return serveWithCache(html, 'text/html; charset=utf-8', request);
+        }
+
+        try {
+          metrics.serverRenderHits++;
+          const html = injectLiveReloadScript(renderCategoryPage(contentCache, category, templatesCache, navigation));
+          renderedCache.set(cacheKey, html);
+          return serveWithCache(html, 'text/html; charset=utf-8', request);
+        } catch (error) {
+          return new Response(`Error: ${error.message}`, { status: 500 });
+        }
+      }
+
+      // Series pages
+      if (route.startsWith('/series/')) {
+        const seriesSlug = route.substring(8).replace(/\/$/, '');
+        const cacheKey = `__series_${seriesSlug}`;
+
+        const precompressed = servePrecompressed(cacheKey, request);
+        if (precompressed) return precompressed;
+
+        const preRendered = renderedCache.get(cacheKey);
+        if (preRendered) {
+          metrics.serverCacheHits++;
+          const html = injectLiveReloadScript(preRendered);
+          return serveWithCache(html, 'text/html; charset=utf-8', request);
+        }
+
+        try {
+          metrics.serverRenderHits++;
+          const allSeries = getAllSeries(contentCache);
+          const series = allSeries.find(s => slugify(s) === seriesSlug);
+          if (!series) {
+            return serve404(request);
+          }
+          const html = injectLiveReloadScript(renderSeriesPage(contentCache, series, templatesCache, navigation));
+          renderedCache.set(cacheKey, html);
+          return serveWithCache(html, 'text/html; charset=utf-8', request);
+        } catch (error) {
+          return new Response(`Error: ${error.message}`, { status: 500 });
+        }
+      }
+
+      // Pagination routes
       if (route.startsWith('/page/')) {
         const pageMatch = route.match(/^\/page\/(\d+)\/?$/);
         if (pageMatch) {
           const page = parseInt(pageMatch[1], 10);
           const cacheKey = `__index_${page}`;
 
-          // Tier 1: Precompressed
           const precompressed = servePrecompressed(cacheKey, request);
           if (precompressed) return precompressed;
 
-          // Tier 2: Rendered cache
           const preRendered = renderedCache.get(cacheKey);
           if (preRendered) {
             metrics.serverCacheHits++;
-            return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+            const html = injectLiveReloadScript(preRendered);
+            return serveWithCache(html, 'text/html; charset=utf-8', request);
           }
 
-          // Tier 3: Render fresh
           try {
             metrics.serverRenderHits++;
-            const html = renderContentList(contentCache, page, templatesCache, navigation, siteConfig);
+            const html = injectLiveReloadScript(renderContentList(contentCache, page, templatesCache, navigation, siteConfig));
             renderedCache.set(cacheKey, html);
             return serveWithCache(html, 'text/html; charset=utf-8', request);
           } catch (error) {
@@ -1115,37 +1308,35 @@ Bun.serve({
         }
       }
 
-      // Homepage - uses three-tier cache via resolveHomepage
+      // Homepage
       if (route === '/') {
         return resolveHomepage(request);
       }
 
-      // FIXED: Article pages - three-tier cache
+      // Article pages
       const slug = route.substring(1).replace(/\/$/, '');
       const content = contentCache.get(slug);
 
       if (content) {
-        // Tier 1: Precompressed
         const precompressed = servePrecompressed(slug, request);
         if (precompressed) return precompressed;
 
-        // Tier 2: Rendered cache
         const preRendered = renderedCache.get(slug);
         if (preRendered) {
           metrics.serverCacheHits++;
-          return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+          const html = injectLiveReloadScript(preRendered);
+          return serveWithCache(html, 'text/html; charset=utf-8', request);
         }
 
-        // Tier 3: Render fresh
         try {
           metrics.serverRenderHits++;
           if (content.type === 'html' && content.renderedHtml !== null) {
-            const html = content.renderedHtml;
+            const html = injectLiveReloadScript(content.renderedHtml);
             renderedCache.set(slug, html);
             return serveWithCache(html, 'text/html; charset=utf-8', request);
           }
 
-          const html = renderContent(content, slug, templatesCache, navigation, siteConfig, contentCache);
+          const html = injectLiveReloadScript(renderContent(content, slug, templatesCache, navigation, siteConfig, contentCache));
           renderedCache.set(slug, html);
           return serveWithCache(html, 'text/html; charset=utf-8', request);
         } catch (error) {
@@ -1172,6 +1363,19 @@ Bun.serve({
       const responseTime = Date.now() - startTime;
       metrics.responseTimes.push(responseTime);
     }
+  },
+
+  // FEATURE 1: WebSocket handler
+  websocket: {
+    open(ws) {
+      liveReloadClients.add(ws);
+    },
+    close(ws) {
+      liveReloadClients.delete(ws);
+    },
+    message(ws, message) {
+      // No-op
+    }
   }
 });
 
@@ -1184,6 +1388,7 @@ console.log(bright(`
 • Active theme: ${activeTheme || '.default (embedded)'}
 • Pre-rendered: ${renderedCache.size} pages
 • Pre-compressed: ${precompressedCache.size / 2} pages × 2 formats
+• Live reload: enabled
 • Admin panel: ${serverUrl}/__thypress/
 `));
 

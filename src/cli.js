@@ -65,19 +65,35 @@ function parseArgs() {
       continue;
     }
 
+    // FIX 13: Argument validation
     if (arg === '--dir' || arg === '-d') {
+      if (i + 1 >= args.length) {
+        console.error(errorMsg('--dir requires a path argument'));
+        console.log(dim('Example: thypress --dir ./my-blog'));
+        process.exit(1);
+      }
       targetDir = args[i + 1];
       i++;
       continue;
     }
 
     if (arg === '--content-dir' || arg === '-c') {
+      if (i + 1 >= args.length) {
+        console.error(errorMsg('--content-dir requires a directory name'));
+        console.log(dim('Example: thypress --content-dir articles'));
+        process.exit(1);
+      }
       contentDir = args[i + 1];
       i++;
       continue;
     }
 
     if (arg === '--skip-dirs') {
+      if (i + 1 >= args.length) {
+        console.error(errorMsg('--skip-dirs requires comma-separated directory names'));
+        console.log(dim('Example: thypress --skip-dirs tmp,cache'));
+        process.exit(1);
+      }
       const dirs = args[i + 1];
       skipDirs = dirs.split(',').map(d => d.trim());
       i++;
@@ -115,18 +131,17 @@ async function ensureDefaults() {
   });
 
   if (shouldInit) {
-    // Create content/posts/ structure
     const postsDir = path.join(contentRoot, 'posts');
     fs.mkdirSync(postsDir, { recursive: true });
     console.log(success(`Created ${contentRoot}`));
 
-    // Create example post with updated conventions documentation
     const examplePost = path.join(postsDir, '2024-01-01-welcome.md');
     fs.writeFileSync(examplePost, `---
 title: Welcome to THYPRESS!
 createdAt: 2024-01-01
 updatedAt: 2024-01-15
 tags: [blogging, markdown, documentation]
+categories: [tutorials]
 description: Your first post with THYPRESS - learn about features and get started
 ---
 
@@ -148,8 +163,11 @@ title: My Post Title
 createdAt: 2024-01-01
 updatedAt: 2024-01-15
 tags: [tag1, tag2]
+categories: [programming]
+series: Getting Started
 description: A short description
 draft: false  # Set to true to hide from site
+permalink: /custom-url/  # Optional: custom URL
 ---
 \`\`\`
 
@@ -158,7 +176,7 @@ draft: false  # Set to true to hide from site
 THYPRESS supports three content types:
 
 - **Markdown** (\`.md\`) - Full CommonMark + GFM support
-- **Plain text** (\`.txt\`) - Rendered in \`<pre>\` tags
+- **Plain text** (\`.txt\`) - Rendered in \`<pre>\` tags (HTML-escaped for security)
 - **HTML** (\`.html\`) - Complete documents or fragments
 
 ## THYPRESS Conventions
@@ -277,6 +295,24 @@ def greet(name):
     print(f"Hello, {name}!")
 \`\`\`
 
+### Admonitions
+
+Use callout boxes for tips, warnings, and notes:
+
+\`\`\`markdown
+:::tip
+This is a helpful tip!
+:::
+
+:::warning
+Be careful with this!
+:::
+
+:::danger
+This is critical information!
+:::
+\`\`\`
+
 ### SEO & Performance
 
 Every page includes:
@@ -285,7 +321,7 @@ Every page includes:
 - Twitter cards
 - JSON-LD structured data
 - Canonical URLs
-- Sitemap + RSS feed
+- Sitemap + RSS feed (including per-tag/category RSS)
 
 ## Content Organization
 
@@ -311,6 +347,47 @@ Your folder structure becomes your URL structure:
 - \`content/docs/api.md\` → \`/docs/api/\`
 - \`content/about.md\` → \`/about/\`
 
+Use \`permalink:\` in front matter to override.
+
+## Taxonomies
+
+THYPRESS supports multiple ways to organize content:
+
+- **Tags**: Lightweight categorization
+- **Categories**: Hierarchical organization
+- **Series**: Group related posts
+
+\`\`\`yaml
+---
+title: Getting Started with THYPRESS
+tags: [tutorial, beginner]
+categories: [documentation, guides]
+series: THYPRESS Tutorial Series
+---
+\`\`\`
+
+Each taxonomy gets its own index page and RSS feed:
+- \`/tag/tutorial/\`
+- \`/category/documentation/\`
+- \`/series/thypress-tutorial-series/\`
+
+## Redirects
+
+Create a \`redirects.json\` file to handle URL migrations:
+
+\`\`\`json
+{
+  "/old-post/": "/new-post/",
+  "/blog/:slug/": "/posts/:slug/"
+}
+\`\`\`
+
+Redirects work in both dev server and build output.
+
+## Live Reload
+
+The dev server automatically reloads your browser when files change. No manual refresh needed!
+
 ## Deployment Options
 
 ### Option A: Static Hosting
@@ -327,8 +404,26 @@ thypress build
 Run as HTTP server on VPS:
 
 \`\`\`bash
-thypress build --serve
-# Production server on port 3009
+PORT=8080 thypress build --serve
+# Production server on specified port
+\`\`\`
+
+## Configuration
+
+Edit \`config.json\` to customize your site:
+
+\`\`\`json
+{
+  "title": "My Site",
+  "description": "A site powered by THYPRESS",
+  "url": "https://example.com",
+  "author": "Anonymous",
+  "readingSpeed": 200,
+  "escapeTextFiles": true,
+  "strictImages": false,
+  "discoverTemplates": false,
+  "fingerprintAssets": true
+}
 \`\`\`
 
 ## Next Steps
@@ -337,6 +432,7 @@ thypress build --serve
 2. **Create new posts**: Add \`.md\` files to \`content/posts/\`
 3. **Customize theme**: Edit templates in \`templates/my-press/\`
 4. **Configure site**: Update \`config.json\`
+5. **Set up redirects**: Create \`redirects.json\` if migrating URLs
 
 ## Documentation
 
@@ -349,17 +445,14 @@ Happy blogging! ✨
     console.log(success(`Created example post\n`));
   }
 
-  // Ensure templates directory with default theme
   const templatesDir = path.join(targetDir, 'templates');
   const defaultThemeDir = path.join(templatesDir, '.default');
 
   if (!fs.existsSync(defaultThemeDir)) {
     fs.mkdirSync(defaultThemeDir, { recursive: true });
 
-    // Load embedded templates using the helper function
     const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
 
-    // Copy embedded templates to .default/
     const templates = [
       { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
       { name: 'post.html', content: EMBEDDED_TEMPLATES['post.html'] },
@@ -383,7 +476,6 @@ Happy blogging! ✨
     console.log(success(`Created templates/.default/`));
   }
 
-  // Check if user theme exists, if not create my-press/ from defaults
   const themes = fs.existsSync(templatesDir)
     ? fs.readdirSync(templatesDir).filter(f => !f.startsWith('.') && fs.statSync(path.join(templatesDir, f)).isDirectory())
     : [];
@@ -392,10 +484,8 @@ Happy blogging! ✨
     const myPressDir = path.join(templatesDir, 'my-press');
     fs.mkdirSync(myPressDir, { recursive: true });
 
-    // Load embedded templates using the helper function
     const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
 
-    // Copy defaults to my-press/
     const templates = [
       { name: 'index.html', content: EMBEDDED_TEMPLATES['index.html'] },
       { name: 'post.html', content: EMBEDDED_TEMPLATES['post.html'] },
@@ -416,7 +506,6 @@ Happy blogging! ✨
     console.log(success(`Created templates/my-press/ (your theme)\n`));
   }
 
-  // Ensure config.json
   const configPath = path.join(targetDir, 'config.json');
   if (!fs.existsSync(configPath)) {
     fs.writeFileSync(configPath, JSON.stringify({
@@ -508,7 +597,6 @@ async function buildAndServe() {
     process.exit(1);
   }
 
-  // Simple preview server for build output
   const START_PORT = 3009;
   const MAX_PORT_TRIES = 100;
 
@@ -629,6 +717,10 @@ ${bright('Options:')}
   --no-browser            Don't auto-open browser
   [directory]             Direct path to directory
 
+${bright('Environment Variables:')}
+  PORT=8080               Set server port (default: auto-detect)
+  DISABLE_AUTOGEN_TEMPLATE=true   Disable template auto-generation
+
 ${bright('Examples:')}
   thypress                           # Serve from current directory
   thypress build                     # Build static site
@@ -637,6 +729,7 @@ ${bright('Examples:')}
   thypress --dir ~/blog              # Serve from ~/blog
   thypress --content-dir articles    # Use articles/ as content
   thypress --skip-dirs tmp,cache     # Skip tmp/ and cache/ folders
+  PORT=8080 thypress serve           # Use specific port
 
 ${bright('Structure:')}
   content/              ← Your content (markdown/text/html)
@@ -647,12 +740,19 @@ ${bright('Structure:')}
   templates/            ← Themes
     my-press/           ← Active theme
     .default/           ← Embedded defaults
+  config.json           ← Site configuration
+  redirects.json        ← URL redirects (optional)
 
 ${bright('Configuration (config.json):')}
   {
     "contentDir": "articles",           // Custom content directory
     "skipDirs": ["tmp", "backup"],      // Additional dirs to skip
-    "theme": "my-press"
+    "theme": "my-press",                // Active theme
+    "readingSpeed": 200,                // Words per minute
+    "escapeTextFiles": true,            // Escape HTML in .txt files
+    "strictImages": false,              // Exit on broken images
+    "discoverTemplates": false,         // Auto-detect template syntax
+    "fingerprintAssets": true           // Add hash to CSS/JS filenames
   }
 
 ${bright('Conventions:')}
@@ -668,6 +768,18 @@ ${bright('Conventions:')}
 
   ${bright('Universal:')}
     .anything           ← Ignored everywhere (content + templates)
+
+${bright('Features:')}
+  • Live reload with WebSocket
+  • Related posts (tag-based)
+  • RSS per tag/category/series
+  • URL redirects (redirects.json)
+  • Taxonomies (tags, categories, series)
+  • Admonitions (:::tip, :::warning, etc.)
+  • Asset fingerprinting
+  • Responsive image optimization
+  • SEO + structured data
+  • Unicode support
 
 ${bright('Docs:')}
   https://github.com/thypress/thypress
