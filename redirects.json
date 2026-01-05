@@ -1,0 +1,14 @@
+{
+  "_comment": "URL Redirect Rules for THYPRESS",
+  "_usage": "Maps old URLs to new URLs. Supports patterns with :param placeholders.",
+
+  "_examples": {
+    "exact_match": "/old-post/ → /new-post/",
+    "pattern_match": "/blog/:slug/ → /posts/:slug/ (replaces :slug with actual value)"
+  },
+
+  "/old-post/": "/new-post/",
+  "/blog/:slug/": "/posts/:slug/",
+  "/articles/:year/:month/:slug/": "/posts/:slug/",
+  "/about-us/": "/about/"
+}

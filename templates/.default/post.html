@@ -75,7 +75,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 </head>
 <body>
   {{#if navigation}}
-    {{> _sidebar-nav items=navigation showWrapper=true}}
+    {{> _sidebar-nav items=navigation}}
   {{/if}}
 
   <main>
@@ -94,11 +94,38 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
         {{#each tags}}<a href="/tag/{{this}}/">{{this}}</a>{{/each}}
       </span>
       {{/if}}
+      {{#if categories}}
+      <span class="categories">
+        {{#each categories}}<a href="/category/{{this}}/">{{this}}</a>{{/each}}
+      </span>
+      {{/if}}
+      {{#if series}}
+      <span class="series">
+        Series: <a href="/series/{{series}}/">{{series}}</a>
+      </span>
+      {{/if}}
     </div>
 
     <article>
       {{{content}}}
     </article>
+
+    {{#if relatedPosts}}{{#if relatedPosts.length}}
+    <aside class="related-posts">
+      <h2>Related Posts</h2>
+      <ul>
+        {{#each relatedPosts}}
+        <li>
+          <h3><a href="{{url}}">{{title}}</a></h3>
+          <div class="meta">{{date}}</div>
+          {{#if description}}
+          <p class="description">{{description}}</p>
+          {{/if}}
+        </li>
+        {{/each}}
+      </ul>
+    </aside>
+    {{/if}}{{/if}}
 
     {{#if prevPost}}{{#if nextPost}}
     <nav class="post-nav">
@@ -117,7 +144,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   </main>
 
   {{#if showToc}}
-    {{> _sidebar-toc items=toc showWrapper=true}}
+    {{> _sidebar-toc items=toc}}
   {{/if}}
 </body>
 </html>

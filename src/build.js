@@ -10,19 +10,26 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import Handlebars from 'handlebars';
+import matter from 'gray-matter';
+import crypto from 'crypto';
 import {
   loadAllContent,
   loadTheme,
   renderContentList,
   renderContent,
   renderTagPage,
+  renderCategoryPage,
+  renderSeriesPage,
   getAllTags,
+  getAllCategories,
+  getAllSeries,
   generateRSS,
   generateSitemap,
   generateSearchIndex,
   optimizeImage,
   getSiteConfig,
-  getContentSorted
+  getContentSorted,
+  slugify
 } from './renderer.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
 
@@ -32,9 +39,6 @@ const CACHE_DIR = path.join(process.cwd(), '.cache');
 
 const CONCURRENCY = Math.max(2, Math.floor(os.availableParallelism() * 0.75));
 
-/**
- * Check if file/folder should be ignored (starts with .)
- */
 function shouldIgnore(name) {
   return name.startsWith('.');
 }
@@ -52,7 +56,6 @@ function copyDirectory(src, dest) {
   const entries = fs.readdirSync(src, { withFileTypes: true });
 
   for (const entry of entries) {
-    // Skip hidden files/folders
     if (shouldIgnore(entry.name)) continue;
 
     const srcPath = path.join(src, entry.name);
@@ -64,6 +67,45 @@ function copyDirectory(src, dest) {
       fs.copyFileSync(srcPath, destPath);
     }
   }
+}
+
+// FIX 10: Simplified template detection with helper function
+function renderTemplate(content, siteConfig, destPath, relPath, options = {}) {
+  try {
+    const template = Handlebars.compile(content);
+    const rendered = template({
+      siteUrl: siteConfig.url || 'https://example.com',
+      siteTitle: siteConfig.title || 'My Site',
+      siteDescription: siteConfig.description || 'A site powered by THYPRESS',
+      author: siteConfig.author || 'Anonymous',
+      ...siteConfig,
+      theme: siteConfig.theme || {}
+    });
+    fs.writeFileSync(destPath, rendered);
+    console.log(success(`Templated: ${relPath}`));
+    return true;
+  } catch (error) {
+    if (options.softFail) {
+      console.log(dim(`Skipped templating ${relPath}: ${error.message}`));
+      return false;
+    }
+    console.error(errorMsg(`Template error in ${relPath}: ${error.message}`));
+    process.exit(1);
+  }
+}
+
+// FEATURE 7: Asset fingerprinting
+const fingerprintCache = new Map();
+
+function generateFingerprint(filePath) {
+  if (fingerprintCache.has(filePath)) {
+    return fingerprintCache.get(filePath);
+  }
+
+  const content = fs.readFileSync(filePath);
+  const hash = crypto.createHash('md5').update(content).digest('hex').substring(0, 8);
+  fingerprintCache.set(filePath, hash);
+  return hash;
 }
 
 function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
@@ -86,47 +128,70 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Skip hidden files/folders
       if (shouldIgnore(entry.name)) continue;
-      // Skip files starting with underscore (partials)
       if (entry.name.startsWith('_')) continue;
-      // Skip .html files (templates)
       if (entry.name.endsWith('.html')) continue;
-      // Skip partials folder
       if (entry.isDirectory() && entry.name === 'partials') continue;
 
       const srcPath = path.join(dir, entry.name);
       const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
-      const destPath = path.join(buildAssetsDir, relPath);
+      const ext = path.extname(entry.name).toLowerCase();
 
       if (entry.isDirectory()) {
         copyThemeFiles(srcPath, relPath);
       } else {
-        fs.mkdirSync(path.dirname(destPath), { recursive: true });
+        const { data: frontMatter, content: fileContent } = matter(fs.readFileSync(srcPath, 'utf-8'));
 
-        const ext = path.extname(entry.name).toLowerCase();
-        const content = fs.readFileSync(srcPath, 'utf-8');
-        const needsTemplating = content.includes('{{') || content.includes('{%');
+        fs.mkdirSync(path.dirname(path.join(buildAssetsDir, relPath)), { recursive: true });
 
-        if (needsTemplating && (ext === '.css' || ext === '.js' || ext === '.txt' || ext === '.xml')) {
-          try {
-            const template = Handlebars.compile(content);
-            const rendered = template({
-              siteUrl: siteConfig.url || 'https://example.com',
-              siteTitle: siteConfig.title || 'My Site',
-              siteDescription: siteConfig.description || 'A site powered by THYPRESS',
-              author: siteConfig.author || 'Anonymous',
-              ...siteConfig,
-              theme: siteConfig.theme || {}
-            });
-            fs.writeFileSync(destPath, rendered);
-            console.log(success(`Rendered templated asset: assets/${relPath}`));
-          } catch (error) {
-            console.error(errorMsg(`Failed to render ${relPath}: ${error.message}`));
-            fs.copyFileSync(srcPath, destPath);
+        // FIX 10: Priority 1 - Explicit front-matter
+        if (frontMatter.template === true) {
+          const destPath = path.join(buildAssetsDir, relPath);
+          renderTemplate(fileContent, siteConfig, destPath, relPath);
+          continue;
+        }
+
+        if (frontMatter.template === false) {
+          fs.copyFileSync(srcPath, path.join(buildAssetsDir, relPath));
+          continue;
+        }
+
+        // FIX 10: Priority 2 - Filename conventions
+        const isExplicitTemplate =
+          entry.name.startsWith('template-') ||
+          entry.name.endsWith('.hbs') ||
+          entry.name.endsWith('.handlebars');
+
+        if (isExplicitTemplate) {
+          const destPath = path.join(buildAssetsDir, relPath);
+          renderTemplate(fileContent, siteConfig, destPath, relPath);
+          continue;
+        }
+
+        // FIX 10: Priority 3 - Broad detection (opt-in)
+        if (siteConfig.discoverTemplates === true) {
+          const hasTemplateSyntax = fileContent.includes('{{') || fileContent.includes('{%');
+
+          if (hasTemplateSyntax && (ext === '.css' || ext === '.js' || ext === '.txt' || ext === '.xml')) {
+            const destPath = path.join(buildAssetsDir, relPath);
+            if (!renderTemplate(fileContent, siteConfig, destPath, relPath, { softFail: true })) {
+              fs.copyFileSync(srcPath, destPath);
+            }
+            continue;
           }
+        }
+
+        // FEATURE 7: Asset fingerprinting for CSS/JS
+        if (siteConfig.fingerprintAssets && (ext === '.css' || ext === '.js')) {
+          const fingerprint = generateFingerprint(srcPath);
+          const parsedPath = path.parse(relPath);
+          const fingerprintedName = `${parsedPath.name}.${fingerprint}${parsedPath.ext}`;
+          const fingerprintedRelPath = path.join(parsedPath.dir, fingerprintedName);
+
+          fs.copyFileSync(srcPath, path.join(buildAssetsDir, fingerprintedRelPath));
+          console.log(success(`Fingerprinted: ${fingerprintedRelPath}`));
         } else {
-          fs.copyFileSync(srcPath, destPath);
+          fs.copyFileSync(srcPath, path.join(buildAssetsDir, relPath));
         }
       }
     }
@@ -136,34 +201,42 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
   console.log(success(`Copied theme assets from ${activeTheme}/`));
 }
 
+// FIX 7: Single loop image check
 function needsOptimization(sourcePath, outputDir, basename, hash) {
-  if (!fs.existsSync(sourcePath)) {
-    return false;
-  }
+  if (!fs.existsSync(sourcePath)) return false;
 
+  const sourceMtime = fs.statSync(sourcePath).mtime.getTime();
   const variants = [400, 800, 1200].flatMap(size => [
     path.join(outputDir, `${basename}-${size}-${hash}.webp`),
     path.join(outputDir, `${basename}-${size}-${hash}.jpg`)
   ]);
 
   for (const variant of variants) {
-    if (!fs.existsSync(variant)) {
-      return true;
-    }
-  }
+    if (!fs.existsSync(variant)) return true;
 
-  const sourceMtime = fs.statSync(sourcePath).mtime.getTime();
-
-  for (const variant of variants) {
-    if (fs.existsSync(variant)) {
-      const variantMtime = fs.statSync(variant).mtime.getTime();
-      if (sourceMtime > variantMtime) {
-        return true;
-      }
-    }
+    const variantMtime = fs.statSync(variant).mtime.getTime();
+    if (sourceMtime > variantMtime) return true;
   }
 
   return false;
+}
+
+// FIX 15: Better progress bar with Unicode detection
+function supportsUnicode() {
+  return process.env.LANG?.includes('UTF-8') ||
+         process.platform === 'darwin' ||
+         process.platform === 'linux';
+}
+
+function getProgressBar(percentage, width = 20) {
+  const filled = Math.floor(percentage / 100 * width);
+  const empty = width - filled;
+
+  if (supportsUnicode()) {
+    return '█'.repeat(filled) + '░'.repeat(empty);
+  } else {
+    return '='.repeat(filled) + '-'.repeat(empty);
+  }
 }
 
 async function optimizeImagesFromContent(imageReferences, outputBaseDir, showProgress = true) {
@@ -221,8 +294,8 @@ async function optimizeImagesFromContent(imageReferences, outputBaseDir, showPro
         optimized++;
         if (showProgress) {
           const percentage = Math.floor((optimized / needsUpdate.length) * 100);
-          const bar = '█'.repeat(Math.floor(percentage / 5)) + '░'.repeat(20 - Math.floor(percentage / 5));
-          process.stdout.write(`  ${bar} ${percentage}% (${optimized}/${needsUpdate.length})\r`);
+          const bar = getProgressBar(percentage);
+          process.stdout.write(`  [${bar}] ${percentage}% (${optimized}/${needsUpdate.length})\r`);
         }
       } catch (error) {
         console.error(`\n${errorMsg(`Error optimizing ${img.outputPath}: ${error.message}`)}`);
@@ -261,7 +334,6 @@ function cleanupOrphanedImages(imageReferences, cacheDir) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Skip hidden files/folders
       if (shouldIgnore(entry.name)) continue;
 
       const fullPath = path.join(dir, entry.name);
@@ -331,7 +403,7 @@ function buildIndexPages(contentCache, templates, navigation, siteConfig) {
   }
 }
 
-function buildTagPages(contentCache, templates, navigation) {
+function buildTagPages(contentCache, templates, navigation, siteConfig) {
   const tags = getAllTags(contentCache);
 
   if (tags.length === 0) {
@@ -344,9 +416,67 @@ function buildTagPages(contentCache, templates, navigation) {
 
     const html = renderTagPage(contentCache, tag, templates, navigation);
     fs.writeFileSync(path.join(tagDir, 'index.html'), html);
+
+    // FEATURE 3: RSS per tag
+    const tagRss = generateRSS(
+      new Map(Array.from(contentCache).filter(([k, v]) => v.tags.includes(tag))),
+      { ...siteConfig, title: `${siteConfig.title} - ${tag}` }
+    );
+    fs.writeFileSync(path.join(tagDir, 'rss.xml'), tagRss);
   }
 
-  console.log(success(`Generated ${tags.length} tag pages`));
+  console.log(success(`Generated ${tags.length} tag pages (with RSS feeds)`));
+}
+
+// FEATURE 5: Build category pages
+function buildCategoryPages(contentCache, templates, navigation, siteConfig) {
+  const categories = getAllCategories(contentCache);
+
+  if (categories.length === 0) {
+    return;
+  }
+
+  for (const category of categories) {
+    const categoryDir = path.join(BUILD_DIR, 'category', category);
+    fs.mkdirSync(categoryDir, { recursive: true });
+
+    const html = renderCategoryPage(contentCache, category, templates, navigation);
+    fs.writeFileSync(path.join(categoryDir, 'index.html'), html);
+
+    const categoryRss = generateRSS(
+      new Map(Array.from(contentCache).filter(([k, v]) => v.categories && v.categories.includes(category))),
+      { ...siteConfig, title: `${siteConfig.title} - ${category}` }
+    );
+    fs.writeFileSync(path.join(categoryDir, 'rss.xml'), categoryRss);
+  }
+
+  console.log(success(`Generated ${categories.length} category pages (with RSS feeds)`));
+}
+
+// FEATURE 5: Build series pages
+function buildSeriesPages(contentCache, templates, navigation, siteConfig) {
+  const series = getAllSeries(contentCache);
+
+  if (series.length === 0) {
+    return;
+  }
+
+  for (const seriesName of series) {
+    const seriesSlug = slugify(seriesName);
+    const seriesDir = path.join(BUILD_DIR, 'series', seriesSlug);
+    fs.mkdirSync(seriesDir, { recursive: true });
+
+    const html = renderSeriesPage(contentCache, seriesName, templates, navigation);
+    fs.writeFileSync(path.join(seriesDir, 'index.html'), html);
+
+    const seriesRss = generateRSS(
+      new Map(Array.from(contentCache).filter(([k, v]) => v.series === seriesName)),
+      { ...siteConfig, title: `${siteConfig.title} - ${seriesName}` }
+    );
+    fs.writeFileSync(path.join(seriesDir, 'rss.xml'), seriesRss);
+  }
+
+  console.log(success(`Generated ${series.length} series pages (with RSS feeds)`));
 }
 
 async function buildRSSAndSitemap(contentCache, siteConfig) {
@@ -467,6 +597,40 @@ function build404Page(themeAssets) {
   }
 }
 
+// FEATURE 4: Build redirect rules
+function buildRedirects() {
+  const redirectsPath = path.join(process.cwd(), 'redirects.json');
+
+  if (!fs.existsSync(redirectsPath)) {
+    return;
+  }
+
+  try {
+    const redirects = JSON.parse(fs.readFileSync(redirectsPath, 'utf-8'));
+
+    // Generate _redirects file for Netlify
+    let netlifyRedirects = '';
+    for (const [from, to] of Object.entries(redirects)) {
+      netlifyRedirects += `${from} ${to} 301\n`;
+    }
+    fs.writeFileSync(path.join(BUILD_DIR, '_redirects'), netlifyRedirects);
+
+    // Generate vercel.json for Vercel
+    const vercelConfig = {
+      redirects: Object.entries(redirects).map(([from, to]) => ({
+        source: from,
+        destination: to,
+        permanent: true
+      }))
+    };
+    fs.writeFileSync(path.join(BUILD_DIR, 'vercel.json'), JSON.stringify(vercelConfig, null, 2));
+
+    console.log(success(`Generated redirect rules (${Object.keys(redirects).length} redirects)`));
+  } catch (error) {
+    console.error(errorMsg(`Failed to generate redirects: ${error.message}`));
+  }
+}
+
 function copyStaticHtmlFiles(contentCache) {
   let count = 0;
 
@@ -493,9 +657,7 @@ function copyStaticFilesFromContent(contentRoot) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Skip hidden files/folders
       if (shouldIgnore(entry.name)) continue;
-      // Skip drafts folders
       if (entry.isDirectory() && entry.name === 'drafts') continue;
 
       const srcPath = path.join(dir, entry.name);
@@ -556,12 +718,15 @@ export async function build() {
 
   buildContent(contentCache, templatesCache, navigation, siteConfig, mode);
   buildIndexPages(contentCache, templatesCache, navigation, siteConfig);
-  buildTagPages(contentCache, templatesCache, navigation);
+  buildTagPages(contentCache, templatesCache, navigation, siteConfig);
+  buildCategoryPages(contentCache, templatesCache, navigation, siteConfig);
+  buildSeriesPages(contentCache, templatesCache, navigation, siteConfig);
   await buildRSSAndSitemap(contentCache, siteConfig);
   buildSearchIndex(contentCache);
   buildRobotsTxt(siteConfig, themeAssets);
   buildLlmsTxt(contentCache, siteConfig, themeAssets);
   build404Page(themeAssets);
+  buildRedirects();
   copyStaticHtmlFiles(contentCache);
   copyStaticFilesFromContent(contentRoot);
 
