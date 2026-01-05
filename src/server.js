@@ -83,25 +83,30 @@ let isBuildingStatic = false;
 let isOptimizingImages = false;
 let optimizeDebounceTimer = null;
 
-// Metrics
+// Metrics - FIXED: Split into meaningful categories
 const metrics = {
   requests: 0,
-  cacheHits: 0,
-  cacheMisses: 0,
+  httpCacheHits: 0,      // HTTP 304 (ETag match)
+  serverCacheHits: 0,    // HTTP 200 (served from cache)
+  serverRenderHits: 0,   // HTTP 200 (had to render)
   responseTimes: []
 };
 
 setInterval(() => {
   if (metrics.requests > 0) {
-    const hitRate = ((metrics.cacheHits / (metrics.cacheHits + metrics.cacheMisses)) * 100).toFixed(1);
+    const totalCacheHits = metrics.httpCacheHits + metrics.serverCacheHits;
+    const totalAttempts = totalCacheHits + metrics.serverRenderHits;
+    const hitRate = totalAttempts > 0 ? ((totalCacheHits / totalAttempts) * 100).toFixed(1) : '0.0';
     const avgTime = metrics.responseTimes.length > 0
       ? (metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length).toFixed(2)
       : '0.00';
-    console.log(dim(`[Metrics] ${metrics.requests} req/10s | Avg: ${avgTime}ms | Cache hit: ${hitRate}%`));
+
+    console.log(dim(`[live] ${metrics.requests} req/10s | Avg: ${avgTime}ms | Cache: ${hitRate}% (HTTP304: ${metrics.httpCacheHits}, Cached: ${metrics.serverCacheHits}, Rendered: ${metrics.serverRenderHits})`));
   }
   metrics.requests = 0;
-  metrics.cacheHits = 0;
-  metrics.cacheMisses = 0;
+  metrics.httpCacheHits = 0;
+  metrics.serverCacheHits = 0;
+  metrics.serverRenderHits = 0;
   metrics.responseTimes = [];
 }, 10000);
 
@@ -175,7 +180,7 @@ async function serveWithCache(content, mimeType, request, options = {}) {
   const ifNoneMatch = request.headers.get('if-none-match');
 
   if (ifNoneMatch === etag) {
-    metrics.cacheHits++;
+    metrics.httpCacheHits++;
     return new Response(null, {
       status: 304,
       headers: {
@@ -184,8 +189,6 @@ async function serveWithCache(content, mimeType, request, options = {}) {
       }
     });
   }
-
-  metrics.cacheMisses++;
 
   let finalContent = contentBuffer;
   let contentEncoding = null;
@@ -210,6 +213,7 @@ async function serveWithCache(content, mimeType, request, options = {}) {
   return new Response(finalContent, { headers });
 }
 
+// FIXED: Now properly tracks HTTP 304 vs cached serving
 function servePrecompressed(slug, request, mimeType = 'text/html; charset=utf-8') {
   const acceptEncoding = request.headers.get('accept-encoding') || '';
   const ifNoneMatch = request.headers.get('if-none-match');
@@ -221,7 +225,7 @@ function servePrecompressed(slug, request, mimeType = 'text/html; charset=utf-8'
   if (!cached) return null;
 
   if (ifNoneMatch === cached.etag) {
-    metrics.cacheHits++;
+    metrics.httpCacheHits++;  // HTTP 304
     return new Response(null, {
       status: 304,
       headers: {
@@ -231,7 +235,7 @@ function servePrecompressed(slug, request, mimeType = 'text/html; charset=utf-8'
     });
   }
 
-  metrics.cacheMisses++;
+  metrics.serverCacheHits++;  // HTTP 200 from cache
   return new Response(cached.content, {
     headers: {
       'Content-Type': mimeType,
@@ -427,37 +431,72 @@ function loadSingleContent(filename) {
   }
 }
 
+// FIXED: Use three-tier cache (precompressed → rendered → render fresh)
 function resolveHomepage(request) {
   if (siteConfig.index) {
     const customContent = contentCache.get(siteConfig.index);
     if (customContent) {
+      // Tier 1: Precompressed
       const precompressed = servePrecompressed(siteConfig.index, request);
       if (precompressed) return precompressed;
 
+      // Tier 2: Rendered cache
+      const preRendered = renderedCache.get(siteConfig.index);
+      if (preRendered) {
+        metrics.serverCacheHits++;
+        return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+      }
+
+      // Tier 3: Render fresh
+      metrics.serverRenderHits++;
       if (customContent.type === 'html' && customContent.renderedHtml !== null) {
         return serveWithCache(customContent.renderedHtml, 'text/html; charset=utf-8', request);
       }
       const html = renderContent(customContent, customContent.slug, templatesCache, navigation, siteConfig, contentCache);
+      renderedCache.set(siteConfig.index, html);
       return serveWithCache(html, 'text/html; charset=utf-8', request);
     }
   }
 
   const indexContent = contentCache.get('index');
   if (indexContent) {
+    // Tier 1: Precompressed
     const precompressed = servePrecompressed('index', request);
     if (precompressed) return precompressed;
 
+    // Tier 2: Rendered cache
+    const preRendered = renderedCache.get('index');
+    if (preRendered) {
+      metrics.serverCacheHits++;
+      return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+    }
+
+    // Tier 3: Render fresh
+    metrics.serverRenderHits++;
     if (indexContent.type === 'html' && indexContent.renderedHtml !== null) {
       return serveWithCache(indexContent.renderedHtml, 'text/html; charset=utf-8', request);
     }
     const html = renderContent(indexContent, 'index', templatesCache, navigation, siteConfig, contentCache);
+    renderedCache.set('index', html);
     return serveWithCache(html, 'text/html; charset=utf-8', request);
   }
 
+  // Default index listing
+  // Tier 1: Precompressed
   const precompressed = servePrecompressed('__index_1', request);
   if (precompressed) return precompressed;
 
+  // Tier 2: Rendered cache
+  const preRendered = renderedCache.get('__index_1');
+  if (preRendered) {
+    metrics.serverCacheHits++;
+    return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+  }
+
+  // Tier 3: Render fresh
+  metrics.serverRenderHits++;
   const html = renderContentList(contentCache, 1, templatesCache, navigation, siteConfig);
+  renderedCache.set('__index_1', html);
   return serveWithCache(html, 'text/html; charset=utf-8', request);
 }
 
@@ -879,7 +918,7 @@ Bun.serve({
         try {
           const cacheKey = `image:${cachedPath}`;
           if (staticAssetCache.has(cacheKey)) {
-            metrics.cacheHits++;
+            metrics.httpCacheHits++;
             const cached = staticAssetCache.get(cacheKey);
             return serveWithCache(cached.content, cached.mimeType, request);
           }
@@ -903,7 +942,7 @@ Bun.serve({
               }
             }
 
-            metrics.cacheMisses++;
+            metrics.serverCacheHits++;
             return serveWithCache(fileContents, mimeType, request);
           }
         } catch (error) {
@@ -943,12 +982,12 @@ Bun.serve({
         const cacheKey = 'search.json';
 
         if (dynamicContentCache.has(cacheKey)) {
-          metrics.cacheHits++;
+          metrics.serverCacheHits++;
           const cached = dynamicContentCache.get(cacheKey);
           return serveWithCache(cached.content, 'application/json; charset=utf-8', request);
         }
 
-        metrics.cacheMisses++;
+        metrics.serverRenderHits++;
         const searchIndex = generateSearchIndex(contentCache);
         dynamicContentCache.set(cacheKey, { content: searchIndex });
 
@@ -960,12 +999,12 @@ Bun.serve({
         const cacheKey = 'rss.xml';
 
         if (dynamicContentCache.has(cacheKey)) {
-          metrics.cacheHits++;
+          metrics.serverCacheHits++;
           const cached = dynamicContentCache.get(cacheKey);
           return serveWithCache(cached.content, 'application/xml; charset=utf-8', request);
         }
 
-        metrics.cacheMisses++;
+        metrics.serverRenderHits++;
         const rss = generateRSS(contentCache, siteConfig);
         dynamicContentCache.set(cacheKey, { content: rss });
 
@@ -977,12 +1016,12 @@ Bun.serve({
         const cacheKey = 'sitemap.xml';
 
         if (dynamicContentCache.has(cacheKey)) {
-          metrics.cacheHits++;
+          metrics.serverCacheHits++;
           const cached = dynamicContentCache.get(cacheKey);
           return serveWithCache(cached.content, 'application/xml; charset=utf-8', request);
         }
 
-        metrics.cacheMisses++;
+        metrics.serverRenderHits++;
         const sitemap = await generateSitemap(contentCache, siteConfig);
         dynamicContentCache.set(cacheKey, { content: sitemap });
 
@@ -1019,32 +1058,56 @@ Bun.serve({
         }
       }
 
-      // Tag pages
+      // FIXED: Tag pages - three-tier cache
       if (route.startsWith('/tag/')) {
         const tag = route.substring(5).replace(/\/$/, '');
+        const cacheKey = `__tag_${tag}`;
 
-        const precompressed = servePrecompressed(`__tag_${tag}`, request);
+        // Tier 1: Precompressed
+        const precompressed = servePrecompressed(cacheKey, request);
         if (precompressed) return precompressed;
 
+        // Tier 2: Rendered cache
+        const preRendered = renderedCache.get(cacheKey);
+        if (preRendered) {
+          metrics.serverCacheHits++;
+          return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+        }
+
+        // Tier 3: Render fresh
         try {
+          metrics.serverRenderHits++;
           const html = renderTagPage(contentCache, tag, templatesCache, navigation);
+          renderedCache.set(cacheKey, html);
           return serveWithCache(html, 'text/html; charset=utf-8', request);
         } catch (error) {
           return new Response(`Error: ${error.message}`, { status: 500 });
         }
       }
 
-      // Pagination routes
+      // FIXED: Pagination routes - three-tier cache
       if (route.startsWith('/page/')) {
         const pageMatch = route.match(/^\/page\/(\d+)\/?$/);
         if (pageMatch) {
           const page = parseInt(pageMatch[1], 10);
+          const cacheKey = `__index_${page}`;
 
-          const precompressed = servePrecompressed(`__index_${page}`, request);
+          // Tier 1: Precompressed
+          const precompressed = servePrecompressed(cacheKey, request);
           if (precompressed) return precompressed;
 
+          // Tier 2: Rendered cache
+          const preRendered = renderedCache.get(cacheKey);
+          if (preRendered) {
+            metrics.serverCacheHits++;
+            return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+          }
+
+          // Tier 3: Render fresh
           try {
+            metrics.serverRenderHits++;
             const html = renderContentList(contentCache, page, templatesCache, navigation, siteConfig);
+            renderedCache.set(cacheKey, html);
             return serveWithCache(html, 'text/html; charset=utf-8', request);
           } catch (error) {
             return new Response(`Error: ${error.message}`, { status: 500 });
@@ -1052,25 +1115,38 @@ Bun.serve({
         }
       }
 
-      // Homepage
+      // Homepage - uses three-tier cache via resolveHomepage
       if (route === '/') {
         return resolveHomepage(request);
       }
 
-      // Try to serve as content page
+      // FIXED: Article pages - three-tier cache
       const slug = route.substring(1).replace(/\/$/, '');
       const content = contentCache.get(slug);
 
       if (content) {
+        // Tier 1: Precompressed
         const precompressed = servePrecompressed(slug, request);
         if (precompressed) return precompressed;
 
+        // Tier 2: Rendered cache
+        const preRendered = renderedCache.get(slug);
+        if (preRendered) {
+          metrics.serverCacheHits++;
+          return serveWithCache(preRendered, 'text/html; charset=utf-8', request);
+        }
+
+        // Tier 3: Render fresh
         try {
+          metrics.serverRenderHits++;
           if (content.type === 'html' && content.renderedHtml !== null) {
-            return serveWithCache(content.renderedHtml, 'text/html; charset=utf-8', request);
+            const html = content.renderedHtml;
+            renderedCache.set(slug, html);
+            return serveWithCache(html, 'text/html; charset=utf-8', request);
           }
 
           const html = renderContent(content, slug, templatesCache, navigation, siteConfig, contentCache);
+          renderedCache.set(slug, html);
           return serveWithCache(html, 'text/html; charset=utf-8', request);
         } catch (error) {
           return new Response(`Error: ${error.message}`, { status: 500 });
