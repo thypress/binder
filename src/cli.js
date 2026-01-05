@@ -24,6 +24,8 @@ function parseArgs() {
   let targetDir = null;
   let openBrowser = true;
   let serveAfterBuild = false;
+  let contentDir = null;
+  let skipDirs = null;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -69,6 +71,19 @@ function parseArgs() {
       continue;
     }
 
+    if (arg === '--content-dir' || arg === '-c') {
+      contentDir = args[i + 1];
+      i++;
+      continue;
+    }
+
+    if (arg === '--skip-dirs') {
+      const dirs = args[i + 1];
+      skipDirs = dirs.split(',').map(d => d.trim());
+      i++;
+      continue;
+    }
+
     if (fs.existsSync(arg) && fs.statSync(arg).isDirectory()) {
       targetDir = arg;
       continue;
@@ -86,15 +101,18 @@ function parseArgs() {
     targetDir = process.cwd();
   }
 
-  return { command, targetDir, openBrowser, serveAfterBuild };
+  return { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs };
 }
 
-const { command, targetDir, openBrowser, serveAfterBuild } = parseArgs();
+const { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs } = parseArgs();
 
 async function ensureDefaults() {
   console.log(info(`Working directory: ${targetDir}\n`));
 
-  const { contentRoot, mode, shouldInit } = detectContentStructure(targetDir);
+  const { contentRoot, mode, shouldInit } = detectContentStructure(targetDir, {
+    cliContentDir: contentDir,
+    cliSkipDirs: skipDirs
+  });
 
   if (shouldInit) {
     // Create content/posts/ structure
@@ -606,6 +624,8 @@ ${bright('Commands:')}
 
 ${bright('Options:')}
   --dir, -d <path>        Target directory (default: current)
+  --content-dir, -c <dir> Content directory name (default: content/)
+  --skip-dirs <dirs>      Comma-separated dirs to skip (adds to defaults)
   --no-browser            Don't auto-open browser
   [directory]             Direct path to directory
 
@@ -615,6 +635,8 @@ ${bright('Examples:')}
   thypress build --serve             # Build + preview
   thypress my-blog/                  # Serve from my-blog/
   thypress --dir ~/blog              # Serve from ~/blog
+  thypress --content-dir articles    # Use articles/ as content
+  thypress --skip-dirs tmp,cache     # Skip tmp/ and cache/ folders
 
 ${bright('Structure:')}
   content/              ← Your content (markdown/text/html)
@@ -625,6 +647,13 @@ ${bright('Structure:')}
   templates/            ← Themes
     my-press/           ← Active theme
     .default/           ← Embedded defaults
+
+${bright('Configuration (config.json):')}
+  {
+    "contentDir": "articles",           // Custom content directory
+    "skipDirs": ["tmp", "backup"],      // Additional dirs to skip
+    "theme": "my-press"
+  }
 
 ${bright('Conventions:')}
   ${bright('Drafts (Content):')}
