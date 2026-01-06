@@ -1843,5 +1843,3 @@
      author: 'Anonymous'
    };
  }
-
- export { __dirname };

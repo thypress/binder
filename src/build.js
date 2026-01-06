@@ -51,24 +51,6 @@ function ensureBuildDir() {
   console.log(success('Build directory created'));
 }
 
-function copyDirectory(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  const entries = fs.readdirSync(src, { withFileTypes: true });
-
-  for (const entry of entries) {
-    if (shouldIgnore(entry.name)) continue;
-
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-
-    if (entry.isDirectory()) {
-      copyDirectory(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-
 // FIX 10: Simplified template detection with helper function
 function renderTemplate(content, siteConfig, destPath, relPath, options = {}) {
   try {
