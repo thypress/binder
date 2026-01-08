@@ -1,150 +1,77 @@
+<!-- templates/post.hbs -->
 <!-- SPDX-License-Identifier: MPL-2.0
 
 This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 -->
+{{#> _layout
+  pageTitle=title
+  pageDescription=description
+  isArticle=true
+  hasPostsList=false
+  showFooterLinks=false
+}}
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{title}}</title>
-  <meta name="description" content="{{description}}">
+  <p><a href="/">Back</a></p>
+  <hr>
 
-  <!-- Open Graph / Facebook -->
-  <meta property="og:type" content="article">
-  <meta property="og:title" content="{{title}}">
-  <meta property="og:description" content="{{description}}">
-  <meta property="og:url" content="{{siteUrl}}{{url}}">
-  {{#if ogImage}}
-  <meta property="og:image" content="{{siteUrl}}{{ogImage}}">
-  {{/if}}
-  <meta property="og:site_name" content="{{siteTitle}}">
-  <meta property="article:published_time" content="{{createdAtISO}}">
-  <meta property="article:modified_time" content="{{updatedAtISO}}">
-  {{#if author}}
-  <meta property="article:author" content="{{author}}">
-  {{/if}}
+  <div class="meta">
+    {{createdAt}}{{#if readingTime}} · {{readingTime}} min read{{/if}}{{#if wordCount}} · {{wordCount}} words{{/if}}
+    {{#unless (eq createdAt updatedAt)}}
+     · Updated: {{updatedAt}}
+    {{/unless}}
+    {{#if tags}}
+    <span class="tags">
+      {{#each tags}}<a href="/tag/{{this}}/">{{this}}</a>{{/each}}
+    </span>
+    {{/if}}
+    {{#if categories}}
+    <span class="categories">
+      {{#each categories}}<a href="/category/{{this}}/">{{this}}</a>{{/each}}
+    </span>
+    {{/if}}
+    {{#if series}}
+    <span class="series">
+      Series: <a href="/series/{{series}}/">{{series}}</a>
+    </span>
+    {{/if}}
+  </div>
 
-  <!-- Twitter -->
-  <meta name="twitter:card" content="{{#if ogImage}}summary_large_image{{else}}summary{{/if}}">
-  <meta name="twitter:title" content="{{title}}">
-  <meta name="twitter:description" content="{{description}}">
-  {{#if ogImage}}
-  <meta name="twitter:image" content="{{siteUrl}}{{ogImage}}">
-  {{/if}}
+  <article>
+    {{{content}}}
+  </article>
 
-  <!-- SEO -->
-  <link rel="canonical" href="{{siteUrl}}{{url}}">
-  {{#if author}}
-  <meta name="author" content="{{author}}">
-  {{/if}}
+  {{#if relatedPosts}}{{#if relatedPosts.length}}
+  <aside class="related-posts">
+    <h2>Related Posts</h2>
+    <ul>
+      {{#each relatedPosts}}
+      <li>
+        <h3><a href="{{url}}">{{title}}</a></h3>
+        <div class="meta">{{date}}</div>
+        {{#if description}}
+        <p class="description">{{description}}</p>
+        {{/if}}
+      </li>
+      {{/each}}
+    </ul>
+  </aside>
+  {{/if}}{{/if}}
 
-  <!-- JSON-LD Structured Data -->
-  <script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "BlogPosting",
-  "headline": "{{title}}",
-  "description": "{{description}}",
-  "datePublished": "{{createdAtISO}}",
-  "dateModified": "{{updatedAtISO}}",{{#if wordCount}}
-  "wordCount": {{wordCount}},{{/if}}{{#if readingTime}}
-  "timeRequired": "PT{{readingTime}}M",{{/if}}
-  "author": {
-    "@type": "Person",
-    "name": "{{author}}"
-  },{{#if ogImage}}
-  "image": "{{siteUrl}}{{ogImage}}",{{/if}}
-  "publisher": {
-    "@type": "Organization",
-    "name": "{{siteTitle}}",
-    "url": "{{siteUrl}}"
-  },
-  "mainEntityOfPage": {
-    "@type": "WebPage",
-    "@id": "{{siteUrl}}{{url}}"
-  }
-}
-  </script>
+  {{#if prevPost}}{{#if nextPost}}
+  <nav class="post-nav">
+    {{#if prevPost}}
+      <div class="post-nav-prev">
+        <a href="{{prevPost.url}}">← {{prevPost.title}}</a>
+      </div>
+    {{/if}}
+    {{#if nextPost}}
+      <div class="post-nav-next">
+        <a href="{{nextPost.url}}">{{nextPost.title}} →</a>
+      </div>
+    {{/if}}
+  </nav>
+  {{/if}}{{/if}}
 
-  <link rel="stylesheet" href="/assets/style.css">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
-</head>
-<body>
-  {{#if navigation}}
-    {{> _sidebar-nav items=navigation}}
-  {{/if}}
-
-  <main>
-    <p><a href="/">Back</a></p>
-    <hr>
-
-    <!--<h1>{{title}}</h1>-->
-
-    <div class="meta">
-      {{createdAt}}{{#if readingTime}} · {{readingTime}} min read{{/if}}{{#if wordCount}} · {{wordCount}} words{{/if}}
-      {{#unless (eq createdAt updatedAt)}}
-       · Updated: {{updatedAt}}
-      {{/unless}}
-      {{#if tags}}
-      <span class="tags">
-        {{#each tags}}<a href="/tag/{{this}}/">{{this}}</a>{{/each}}
-      </span>
-      {{/if}}
-      {{#if categories}}
-      <span class="categories">
-        {{#each categories}}<a href="/category/{{this}}/">{{this}}</a>{{/each}}
-      </span>
-      {{/if}}
-      {{#if series}}
-      <span class="series">
-        Series: <a href="/series/{{series}}/">{{series}}</a>
-      </span>
-      {{/if}}
-    </div>
-
-    <article>
-      {{{content}}}
-    </article>
-
-    {{#if relatedPosts}}{{#if relatedPosts.length}}
-    <aside class="related-posts">
-      <h2>Related Posts</h2>
-      <ul>
-        {{#each relatedPosts}}
-        <li>
-          <h3><a href="{{url}}">{{title}}</a></h3>
-          <div class="meta">{{date}}</div>
-          {{#if description}}
-          <p class="description">{{description}}</p>
-          {{/if}}
-        </li>
-        {{/each}}
-      </ul>
-    </aside>
-    {{/if}}{{/if}}
-
-    {{#if prevPost}}{{#if nextPost}}
-    <nav class="post-nav">
-      {{#if prevPost}}
-        <div class="post-nav-prev">
-          <a href="{{prevPost.url}}">← {{prevPost.title}}</a>
-        </div>
-      {{/if}}
-      {{#if nextPost}}
-        <div class="post-nav-next">
-          <a href="{{nextPost.url}}">{{nextPost.title}} →</a>
-        </div>
-      {{/if}}
-    </nav>
-    {{/if}}{{/if}}
-  </main>
-
-  {{#if showToc}}
-    {{> _sidebar-toc items=toc}}
-  {{/if}}
-</body>
-</html>
+{{/_layout}}

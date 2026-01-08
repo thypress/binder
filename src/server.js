@@ -47,6 +47,10 @@ const DEBOUNCE_DELAY = 500;
 const gzip = promisify(zlib.gzip);
 const brotliCompress = promisify(zlib.brotliCompress);
 
+// Valid HTTP redirect status codes
+const VALID_REDIRECT_CODES = [301, 302, 303, 307, 308];
+const DEFAULT_REDIRECT_STATUS = 301;
+
 // FEATURE 1: WebSocket for live reload
 const liveReloadClients = new Set();
 
@@ -72,42 +76,103 @@ let brokenImages = [];
 let contentMode = 'structured';
 let contentRoot = '';
 
-// FEATURE 4: Load redirect rules
-let redirectRules = new Map();
+// FEATURE 4: Enhanced redirect rules with status codes
+let redirectRules = new Map(); // Map<from, { to, statusCode }>
 
+/**
+ * Load redirect rules from redirects.json
+ * Supports both simple and advanced formats
+ */
 function loadRedirects() {
   const redirectsPath = path.join(process.cwd(), 'redirects.json');
 
-  if (fsSync.existsSync(redirectsPath)) {
-    try {
-      const redirects = JSON.parse(fsSync.readFileSync(redirectsPath, 'utf-8'));
-      redirectRules = new Map(Object.entries(redirects));
-      console.log(success(`Loaded ${redirectRules.size} redirect rules`));
-    } catch (error) {
-      console.error(errorMsg(`Failed to load redirects: ${error.message}`));
+  if (!fsSync.existsSync(redirectsPath)) {
+    return;
+  }
+
+  try {
+    const redirectsData = JSON.parse(fsSync.readFileSync(redirectsPath, 'utf-8'));
+    redirectRules = new Map();
+
+    for (const [from, toData] of Object.entries(redirectsData)) {
+      // Skip comment keys
+      if (from.startsWith('_')) continue;
+
+      let to, statusCode;
+
+      if (typeof toData === 'string') {
+        // Simple format: { "/old": "/new" }
+        to = toData;
+        statusCode = DEFAULT_REDIRECT_STATUS;
+      } else if (typeof toData === 'object' && toData.to) {
+        // Advanced format: { "/old": { "to": "/new", "statusCode": 302 } }
+        to = toData.to;
+        statusCode = toData.statusCode || DEFAULT_REDIRECT_STATUS;
+      } else {
+        console.log(warning(`Invalid redirect rule for "${from}", skipping`));
+        continue;
+      }
+
+      // Validate status code
+      if (!VALID_REDIRECT_CODES.includes(statusCode)) {
+        console.log(warning(`Invalid status code ${statusCode} for "${from}", using ${DEFAULT_REDIRECT_STATUS}`));
+        statusCode = DEFAULT_REDIRECT_STATUS;
+      }
+
+      redirectRules.set(from, { to, statusCode });
     }
+
+    if (redirectRules.size > 0) {
+      console.log(success(`Loaded ${redirectRules.size} redirect rules`));
+
+      // Show status code breakdown
+      const statusBreakdown = Array.from(redirectRules.values()).reduce((acc, rule) => {
+        acc[rule.statusCode] = (acc[rule.statusCode] || 0) + 1;
+        return acc;
+      }, {});
+
+      console.log(dim(`  Status codes: ${Object.entries(statusBreakdown).map(([code, count]) => `${count}×${code}`).join(', ')}`));
+    }
+
+  } catch (error) {
+    console.error(errorMsg(`Failed to load redirects: ${error.message}`));
   }
 }
 
-function matchRedirect(path) {
-  for (const [from, to] of redirectRules) {
-    // Exact match
-    if (from === path) {
-      return to;
-    }
+/**
+ * Match a request path against redirect rules
+ * Supports exact matches and :param patterns
+ * Returns { to, statusCode } or null
+ */
+function matchRedirect(requestPath) {
+  // Try exact match first (fastest)
+  if (redirectRules.has(requestPath)) {
+    return redirectRules.get(requestPath);
+  }
 
-    // Pattern match with :param
+  // Try pattern matching with :param
+  for (const [from, redirect] of redirectRules) {
+    // Skip if no parameters
+    if (!from.includes(':')) continue;
+
+    // Convert :param to regex capture groups
     const pattern = from.replace(/:\w+/g, '([^/]+)');
     const regex = new RegExp(`^${pattern}$`);
-    const match = path.match(regex);
+    const match = requestPath.match(regex);
 
     if (match) {
-      let redirectTo = to;
+      // Replace :params in destination with captured values
+      let destination = redirect.to;
       const params = from.match(/:\w+/g) || [];
+
       params.forEach((param, i) => {
-        redirectTo = redirectTo.replace(param, match[i + 1]);
+        destination = destination.replace(param, match[i + 1]);
       });
-      return redirectTo;
+
+      return {
+        to: destination,
+        statusCode: redirect.statusCode
+      };
     }
   }
 
@@ -796,10 +861,17 @@ Bun.serve({
         return new Response('WebSocket upgrade failed', { status: 400 });
       }
 
-      // FEATURE 4: Redirect handling
-      const redirectTo = matchRedirect(route);
-      if (redirectTo) {
-        return Response.redirect(new URL(redirectTo, url.origin).toString(), 301);
+      // FEATURE 4: Enhanced redirect handling
+      const redirectMatch = matchRedirect(route);
+      if (redirectMatch) {
+        const { to, statusCode } = redirectMatch;
+
+        // Build full URL for redirect
+        const redirectUrl = to.startsWith('http://') || to.startsWith('https://')
+          ? to
+          : new URL(to, url.origin).toString();
+
+        return Response.redirect(redirectUrl, statusCode);
       }
 
       // Admin page
@@ -1389,6 +1461,7 @@ console.log(bright(`
 • Pre-rendered: ${renderedCache.size} pages
 • Pre-compressed: ${precompressedCache.size / 2} pages × 2 formats
 • Live reload: enabled
+• Redirects: ${redirectRules.size} rules
 • Admin panel: ${serverUrl}/__thypress/
 `));
 

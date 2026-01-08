@@ -33,11 +33,21 @@ import {
 } from './renderer.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const BUILD_DIR = path.join(process.cwd(), 'build');
 const CACHE_DIR = path.join(process.cwd(), '.cache');
 
 const CONCURRENCY = Math.max(2, Math.floor(os.availableParallelism() * 0.75));
+
+// Redirect status codes configuration
+const REDIRECT_STATUS_CODES = {
+  301: { type: 'permanent', description: 'Moved Permanently - Best for SEO', netlifyCode: '301', vercelPermanent: true },
+  308: { type: 'permanent', description: 'Permanent Redirect - Preserves POST data', netlifyCode: '308', vercelPermanent: true },
+  302: { type: 'temporary', description: 'Found - General temporary redirect', netlifyCode: '302', vercelPermanent: false },
+  307: { type: 'temporary', description: 'Temporary Redirect - Preserves POST data', netlifyCode: '307', vercelPermanent: false },
+  303: { type: 'functional', description: 'See Other - Post-form redirect', netlifyCode: '303', vercelPermanent: false }
+};
+
+const DEFAULT_STATUS_CODE = 301;
 
 function shouldIgnore(name) {
   return name.startsWith('.');
@@ -51,7 +61,7 @@ function ensureBuildDir() {
   console.log(success('Build directory created'));
 }
 
-// FIX 10: Simplified template detection with helper function
+// Simplified template detection with helper function
 function renderTemplate(content, siteConfig, destPath, relPath, options = {}) {
   try {
     const template = Handlebars.compile(content);
@@ -126,7 +136,7 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
 
         fs.mkdirSync(path.dirname(path.join(buildAssetsDir, relPath)), { recursive: true });
 
-        // FIX 10: Priority 1 - Explicit front-matter
+        // Priority 1 - Explicit front-matter
         if (frontMatter.template === true) {
           const destPath = path.join(buildAssetsDir, relPath);
           renderTemplate(fileContent, siteConfig, destPath, relPath);
@@ -138,7 +148,7 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
           continue;
         }
 
-        // FIX 10: Priority 2 - Filename conventions
+        // Priority 2 - Filename conventions
         const isExplicitTemplate =
           entry.name.startsWith('template-') ||
           entry.name.endsWith('.hbs') ||
@@ -150,7 +160,7 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
           continue;
         }
 
-        // FIX 10: Priority 3 - Broad detection (opt-in)
+        // Priority 3 - Broad detection (opt-in)
         if (siteConfig.discoverTemplates === true) {
           const hasTemplateSyntax = fileContent.includes('{{') || fileContent.includes('{%');
 
@@ -183,7 +193,7 @@ function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
   console.log(success(`Copied theme assets from ${activeTheme}/`));
 }
 
-// FIX 7: Single loop image check
+// Single loop image check
 function needsOptimization(sourcePath, outputDir, basename, hash) {
   if (!fs.existsSync(sourcePath)) return false;
 
@@ -203,7 +213,7 @@ function needsOptimization(sourcePath, outputDir, basename, hash) {
   return false;
 }
 
-// FIX 15: Better progress bar with Unicode detection
+// Better progress bar with Unicode detection
 function supportsUnicode() {
   return process.env.LANG?.includes('UTF-8') ||
          process.platform === 'darwin' ||
@@ -579,7 +589,125 @@ function build404Page(themeAssets) {
   }
 }
 
-// FEATURE 4: Build redirect rules
+// FEATURE 4: Enhanced redirect system with Dual-Build Strategy
+function parseRedirectRules(redirectsData) {
+  const rules = [];
+  const errors = [];
+
+  for (const [from, toData] of Object.entries(redirectsData)) {
+    // Skip comment keys
+    if (from.startsWith('_')) continue;
+
+    // Validate "from" path
+    if (!from.startsWith('/')) {
+      errors.push(`Invalid "from" path "${from}": must start with /`);
+      continue;
+    }
+
+    // Parse destination and status code
+    let to, statusCode;
+
+    if (typeof toData === 'string') {
+      // Simple format: { "/old": "/new" }
+      to = toData;
+      statusCode = DEFAULT_STATUS_CODE;
+    } else if (typeof toData === 'object' && toData.to) {
+      // Advanced format: { "/old": { "to": "/new", "statusCode": 302 } }
+      to = toData.to;
+      statusCode = toData.statusCode || DEFAULT_STATUS_CODE;
+    } else {
+      errors.push(`Invalid redirect rule for "${from}": must be string or object with "to" property`);
+      continue;
+    }
+
+    // Validate "to" path
+    if (!to.startsWith('/') && !to.startsWith('http://') && !to.startsWith('https://')) {
+      errors.push(`Invalid "to" path "${to}": must start with / or be absolute URL`);
+      continue;
+    }
+
+    // Validate status code
+    if (!REDIRECT_STATUS_CODES[statusCode]) {
+      errors.push(`Invalid status code ${statusCode} for "${from}": must be 301, 302, 303, 307, or 308`);
+      continue;
+    }
+
+    rules.push({ from, to, statusCode });
+  }
+
+  return { rules, errors };
+}
+
+function generateFallbackHTML(to, statusCode) {
+  const isPermanent = REDIRECT_STATUS_CODES[statusCode].type === 'permanent';
+  const statusInfo = REDIRECT_STATUS_CODES[statusCode];
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="0; url=${to}">
+  <link rel="canonical" href="${to}">
+  <title>Redirecting...</title>
+  <script>window.location.replace("${to}");</script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      background: #f9f9f9;
+      text-align: center;
+      padding: 2rem;
+    }
+    .container {
+      max-width: 500px;
+    }
+    h1 {
+      font-size: 1.5rem;
+      color: #2a2a2a;
+      margin-bottom: 1rem;
+    }
+    p {
+      color: #666;
+      line-height: 1.6;
+    }
+    a {
+      color: #1d7484;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .status {
+      display: inline-block;
+      margin-top: 1rem;
+      padding: 0.5rem 1rem;
+      background: ${isPermanent ? '#e8f5e9' : '#fff3e0'};
+      color: ${isPermanent ? '#388e3c' : '#f57c00'};
+      border-radius: 4px;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Redirecting...</h1>
+    <p>
+      This page has ${isPermanent ? 'permanently' : 'temporarily'} moved.<br>
+      If you are not automatically redirected, please click:
+    </p>
+    <p><a href="${to}">${to}</a></p>
+    <div class="status">${statusCode} - ${statusInfo.description}</div>
+  </div>
+</body>
+</html>`;
+}
+
 function buildRedirects() {
   const redirectsPath = path.join(process.cwd(), 'redirects.json');
 
@@ -588,28 +716,118 @@ function buildRedirects() {
   }
 
   try {
-    const redirects = JSON.parse(fs.readFileSync(redirectsPath, 'utf-8'));
+    const redirectsData = JSON.parse(fs.readFileSync(redirectsPath, 'utf-8'));
+    const { rules, errors } = parseRedirectRules(redirectsData);
 
-    // Generate _redirects file for Netlify
-    let netlifyRedirects = '';
-    for (const [from, to] of Object.entries(redirects)) {
-      netlifyRedirects += `${from} ${to} 301\n`;
+    // Report validation errors
+    if (errors.length > 0) {
+      console.error(errorMsg('Redirect validation errors:'));
+      errors.forEach(err => console.log(dim(`  • ${err}`)));
+      process.exit(1);
+    }
+
+    if (rules.length === 0) {
+      console.log(warning('No valid redirect rules found'));
+      return;
+    }
+
+    // ========================================
+    // STRATEGY 1: Smart Host Files
+    // ========================================
+
+    // Generate _redirects file for Netlify/Cloudflare Pages
+    let netlifyRedirects = '# Generated by THYPRESS\n';
+    netlifyRedirects += '# Format: from to status-code\n\n';
+
+    for (const rule of rules) {
+      netlifyRedirects += `${rule.from} ${rule.to} ${rule.statusCode}\n`;
     }
     fs.writeFileSync(path.join(BUILD_DIR, '_redirects'), netlifyRedirects);
 
     // Generate vercel.json for Vercel
     const vercelConfig = {
-      redirects: Object.entries(redirects).map(([from, to]) => ({
-        source: from,
-        destination: to,
-        permanent: true
+      redirects: rules.map(rule => ({
+        source: rule.from,
+        destination: rule.to,
+        permanent: REDIRECT_STATUS_CODES[rule.statusCode].vercelPermanent,
+        statusCode: rule.statusCode
       }))
     };
     fs.writeFileSync(path.join(BUILD_DIR, 'vercel.json'), JSON.stringify(vercelConfig, null, 2));
 
-    console.log(success(`Generated redirect rules (${Object.keys(redirects).length} redirects)`));
+    // ========================================
+    // STRATEGY 2: Dumb Host Fallback HTML
+    // ========================================
+
+    let fallbackCount = 0;
+    const skippedExternal = [];
+
+    for (const rule of rules) {
+      // Skip external redirects (can't create fallback HTML)
+      if (rule.to.startsWith('http://') || rule.to.startsWith('https://')) {
+        skippedExternal.push(rule.from);
+        continue;
+      }
+
+      // Determine output path for fallback HTML
+      let fallbackPath;
+
+      if (rule.from.endsWith('/')) {
+        // Path with trailing slash: /old-post/
+        fallbackPath = path.join(BUILD_DIR, rule.from, 'index.html');
+      } else {
+        // Path without trailing slash: /old-post
+        // Create both /old-post.html and /old-post/index.html for maximum compatibility
+        const htmlPath = path.join(BUILD_DIR, rule.from + '.html');
+        const indexPath = path.join(BUILD_DIR, rule.from, 'index.html');
+
+        // Generate and write both versions
+        const html = generateFallbackHTML(rule.to, rule.statusCode);
+
+        fs.mkdirSync(path.dirname(htmlPath), { recursive: true });
+        fs.writeFileSync(htmlPath, html);
+
+        fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+        fs.writeFileSync(indexPath, html);
+
+        fallbackCount += 2;
+        continue;
+      }
+
+      // Create directory structure
+      const fallbackDir = path.dirname(fallbackPath);
+      fs.mkdirSync(fallbackDir, { recursive: true });
+
+      // Generate and write fallback HTML
+      const html = generateFallbackHTML(rule.to, rule.statusCode);
+      fs.writeFileSync(fallbackPath, html);
+
+      fallbackCount++;
+    }
+
+    // ========================================
+    // Success Report
+    // ========================================
+
+    console.log(success(`Generated redirect rules (${rules.length} redirects)`));
+    console.log(dim(`  Smart hosts: _redirects (Netlify/Cloudflare), vercel.json (Vercel)`));
+    console.log(dim(`  Dumb hosts: ${fallbackCount} fallback HTML files`));
+
+    if (skippedExternal.length > 0) {
+      console.log(warning(`  External redirects (no fallback): ${skippedExternal.length}`));
+    }
+
+    // Status code breakdown
+    const statusBreakdown = rules.reduce((acc, rule) => {
+      acc[rule.statusCode] = (acc[rule.statusCode] || 0) + 1;
+      return acc;
+    }, {});
+
+    console.log(dim(`  Status codes: ${Object.entries(statusBreakdown).map(([code, count]) => `${count}×${code}`).join(', ')}`));
+
   } catch (error) {
     console.error(errorMsg(`Failed to generate redirects: ${error.message}`));
+    process.exit(1);
   }
 }
 
@@ -738,4 +956,4 @@ export async function optimizeToCache(imageReferences, brokenImages) {
   return count;
 }
 
-export { CACHE_DIR };
+export { CACHE_DIR, REDIRECT_STATUS_CODES, DEFAULT_STATUS_CODE, parseRedirectRules };

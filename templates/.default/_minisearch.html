@@ -1,0 +1,75 @@
+<!-- templates/partials/_minisearch.hbs -->
+<!-- SPDX-License-Identifier: MPL-2.0
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+<script src="https://cdn.jsdelivr.net/npm/minisearch@7.1.0/dist/umd/index.min.js"></script>
+<script>
+  let miniSearch;
+  const searchInput = document.getElementById('search-input');
+  const searchResults = document.getElementById('search-results');
+  const postsList = document.getElementById('posts-list');
+
+  fetch('/search.json')
+    .then(r => r.json())
+    .then(data => {
+      miniSearch = new MiniSearch({
+        fields: ['title', 'content', 'tags', 'description'],
+        storeFields: ['title', 'slug', 'url', 'date', 'description'],
+        searchOptions: {
+          boost: { title: 2, description: 1.5 },
+          fuzzy: 0.2,
+          prefix: true
+        }
+      });
+
+      miniSearch.addAll(data);
+    })
+    .catch(err => console.error('Search failed:', err));
+
+  searchInput.addEventListener('input', (e) => {
+    const query = e.target.value.trim();
+
+    if (!query) {
+      searchResults.style.display = 'none';
+      postsList.style.display = 'block';
+      return;
+    }
+
+    if (!miniSearch) {
+      searchResults.innerHTML = '<p>Loading...</p>';
+      searchResults.style.display = 'block';
+      return;
+    }
+
+    const results = miniSearch.search(query);
+
+    if (results.length === 0) {
+      searchResults.innerHTML = '<p>No results found.</p>';
+    } else {
+      searchResults.innerHTML = results.slice(0, 10).map(result => {
+        return `
+          <div class="search-result">
+            <h4><a href="${result.url}">${result.title}</a></h4>
+            <div class="meta">${result.date}</div>
+            ${result.description ? `<p>${result.description}</p>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    searchResults.style.display = 'block';
+    postsList.style.display = 'none';
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!searchInput.contains(e.target) && !searchResults.contains(e.target)) {
+      if (searchInput.value === '') {
+        searchResults.style.display = 'none';
+        postsList.style.display = 'block';
+      }
+    }
+  });
+</script>

@@ -1,0 +1,44 @@
+<!-- templates/partials/_layout.hbs -->
+<!-- SPDX-License-Identifier: MPL-2.0
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {{> _head
+    pageTitle=pageTitle
+    pageTitlePrefix=pageTitlePrefix
+    pageTitleValue=pageTitleValue
+    pageDescription=pageDescription
+    isArticle=isArticle
+  }}
+</head>
+<body>
+  {{#if navigation}}
+    {{> _sidebar-nav}}
+  {{/if}}
+
+  <main>
+    {{#if hasPostsList}}
+      {{> @partial-block}}
+    {{else}}
+      <div id="posts-list">
+        {{> @partial-block}}
+      </div>
+    {{/if}}
+
+    {{#if showFooterLinks}}
+      <hr>
+      <p><a href="/rss.xml">RSS</a> | <a href="/sitemap.xml">Sitemap</a></p>
+    {{/if}}
+  </main>
+
+  {{> _sidebar-toc}}
+
+  {{> _search-dialog}}
+  {{> _minisearch}}
+</body>
+</html>

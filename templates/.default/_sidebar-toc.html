@@ -14,46 +14,87 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 </aside>
 
 <script>
-// Scroll spy for TOC active highlighting
-(function() {
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach((entry) => {
-      const id = entry.target.getAttribute('id');
-      const tocLink = document.querySelector(`.toc a[href="#${id}"]`);
+(function () {
+  const headings = Array.from(
+    document.querySelectorAll('article h2[id], article h3[id], article h4[id]')
+  );
+  const tocAnchors = Array.from(document.querySelectorAll('.toc a[href^="#"]'));
+  if (!headings.length || !tocAnchors.length) return;
 
-      if (tocLink) {
-        if (entry.isIntersecting) {
-          // Remove active from all links
-          document.querySelectorAll('.toc a').forEach(link => {
-            link.classList.remove('active');
-          });
-          // Add active to current link
-          tocLink.classList.add('active');
-        }
-      }
+  const linkById = new Map();
+  for (const a of tocAnchors) {
+    const raw = a.getAttribute('href').slice(1);
+    const id = decodeURIComponent(raw);
+    linkById.set(id, a);
+  }
+
+  let activeId = null;
+
+  function setActive(id) {
+    if (!id || id === activeId) return;
+    activeId = id;
+
+    const prev = document.querySelector('.toc a.active');
+    if (prev) prev.classList.remove('active');
+
+    const a = linkById.get(id);
+    if (a) a.classList.add('active');
+  }
+
+  const root = document.documentElement;
+  const body = document.body;
+
+  const scrollPadTop =
+    parseFloat(getComputedStyle(root).scrollPaddingTop) ||
+    parseFloat(getComputedStyle(body).scrollPaddingTop) ||
+    0;
+
+  const scrollMarginTop =
+    parseFloat(getComputedStyle(headings[0]).scrollMarginTop) || 0;
+
+  const offset = Math.max(scrollPadTop, scrollMarginTop) + 8;
+
+  function computeActiveFromScroll() {
+    let current = headings[0].id;
+    for (const h of headings) {
+      const top = h.getBoundingClientRect().top;
+      if (top <= offset) current = h.id;
+      else break;
+    }
+    return current;
+  }
+
+  let ticking = false;
+  function onScrollOrResize() {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      setActive(computeActiveFromScroll());
     });
-  }, {
-    rootMargin: '-20% 0px -35% 0px'
-  });
+  }
 
-  // Observe all headings that have IDs
-  document.querySelectorAll('article h2[id], article h3[id], article h4[id]').forEach((heading) => {
-    observer.observe(heading);
-  });
+  window.addEventListener('scroll', onScrollOrResize, { passive: true });
+  window.addEventListener('resize', onScrollOrResize);
 
-  // Smooth scroll for TOC links
-  document.querySelectorAll('.toc a').forEach(link => {
-    link.addEventListener('click', (e) => {
-      e.preventDefault();
-      const id = link.getAttribute('href').substring(1);
+  // Click: NO immediate setActive -> background will "travel" during smooth scroll.
+  for (const a of tocAnchors) {
+    a.addEventListener('click', (e) => {
+      const id = decodeURIComponent(a.getAttribute('href').slice(1));
       const target = document.getElementById(id);
-      if (target) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        // Update URL without triggering page jump
-        history.pushState(null, null, `#${id}`);
-      }
+      if (!target) return;
+
+      e.preventDefault();
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      history.pushState(null, null, `#${encodeURIComponent(id)}`);
     });
-  });
+  }
+
+  if (location.hash) {
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (linkById.has(id)) setActive(id);
+  }
+  setActive(computeActiveFromScroll());
 })();
 </script>
 {{/if}}

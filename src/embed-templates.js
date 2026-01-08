@@ -25,7 +25,12 @@ const templates = {
   '_sidebar-nav.html': fs.readFileSync(path.join(templatesDir, '_sidebar-nav.html'), 'utf-8'),
   '_sidebar-toc.html': fs.readFileSync(path.join(templatesDir, '_sidebar-toc.html'), 'utf-8'),
   '_nav-tree.html': fs.readFileSync(path.join(templatesDir, '_nav-tree.html'), 'utf-8'),
-  '_toc-tree.html': fs.readFileSync(path.join(templatesDir, '_toc-tree.html'), 'utf-8')
+  '_toc-tree.html': fs.readFileSync(path.join(templatesDir, '_toc-tree.html'), 'utf-8'),
+
+  '_head.html': fs.readFileSync(path.join(templatesDir, '_head.html'), 'utf-8'),
+  '_layout.html': fs.readFileSync(path.join(templatesDir, '_layout.html'), 'utf-8'),
+  '_minisearch.html': fs.readFileSync(path.join(templatesDir, '_minisearch.html'), 'utf-8'),
+  '_search-dialog.html': fs.readFileSync(path.join(templatesDir, '_search-dialog.html'), 'utf-8')
 };
 
 const output = `// AUTO-GENERATED - DO NOT EDIT

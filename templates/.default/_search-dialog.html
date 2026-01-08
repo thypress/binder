@@ -1,0 +1,170 @@
+<!-- templates/partials/_search-dialog.hbs -->
+<!-- SPDX-License-Identifier: MPL-2.0
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+<dialog class="search-dialog" id="search-dialog" aria-label="Search">
+  <div class="search-dialog-inner">
+    <div class="search-dialog-top">
+      <strong class="search-dialog-title">Search</strong>
+      <button type="button" class="search-close" id="close-search" aria-label="Close search">×</button>
+    </div>
+
+    <div class="search-box">
+      <input type="text" id="search-input" placeholder="Search posts..." autocomplete="off">
+      <div class="search-results" id="search-results"></div>
+    </div>
+  </div>
+</dialog>
+
+<script>
+  (function () {
+    var dlg = document.getElementById("search-dialog");
+    var openBtn = document.getElementById("open-search");
+    var closeBtn = document.getElementById("close-search");
+    var input = document.getElementById("search-input");
+
+    function isEditableTarget(t) {
+      if (!t) return false;
+      var tag = (t.tagName || "").toLowerCase();
+      return t.isContentEditable || tag === "input" || tag === "textarea" || tag === "select";
+    }
+
+    function openDialog() {
+      if (!dlg) return;
+      if (typeof dlg.showModal === "function") dlg.showModal();
+      else dlg.setAttribute("open", "");
+      setTimeout(function () {
+        try {
+          if (input) {
+            input.focus();
+            input.select();
+          }
+        } catch (e) {}
+      }, 0);
+    }
+
+    function closeDialog() {
+      if (!dlg) return;
+      if (typeof dlg.close === "function") dlg.close();
+      else dlg.removeAttribute("open");
+      try {
+        if (input) {
+          input.value = "";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      } catch (e) {}
+    }
+
+    if (openBtn) openBtn.addEventListener("click", openDialog);
+    if (closeBtn) closeBtn.addEventListener("click", closeDialog);
+
+    if (dlg) {
+      // Click outside dialog content to close
+      dlg.addEventListener("click", function (e) {
+        var rect = dlg.getBoundingClientRect();
+        var inside =
+          e.clientX >= rect.left &&
+          e.clientX <= rect.right &&
+          e.clientY >= rect.top &&
+          e.clientY <= rect.bottom;
+        if (!inside) closeDialog();
+      });
+
+      // Close when clicking a search result link
+      dlg.addEventListener("click", function (e) {
+        var a = e.target && e.target.closest ? e.target.closest(".search-results a") : null;
+        if (a) closeDialog();
+      });
+    }
+
+    document.addEventListener("keydown", function (e) {
+      var key = (e.key || "").toLowerCase();
+      var isMac = !!(navigator.platform && /mac/i.test(navigator.platform));
+      var mod = isMac ? e.metaKey : e.ctrlKey;
+
+      // Ctrl/Cmd+K
+      if (mod && key === "k") {
+        e.preventDefault();
+        openDialog();
+        return;
+      }
+
+      // "/" (common docs/blog shortcut)
+      if (e.key === "/" && !mod && !e.altKey) {
+        if (!isEditableTarget(e.target)) {
+          e.preventDefault();
+          openDialog();
+        }
+      }
+    });
+  })();
+</script>
+
+<script>
+  (function () {
+    var btn = document.getElementById("theme-toggle");
+
+    const moonSvg = `<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`
+    const sunSvg = `<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M19.07 4.93l-1.41 1.41M6.34 17.66l-1.41 1.41"/></svg>`
+
+    if (!btn) return;
+
+    function effectiveTheme() {
+      var forced = document.documentElement.getAttribute("data-theme");
+      if (forced === "light" || forced === "dark") return forced;
+      try {
+        return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      } catch (e) {
+        return "light";
+      }
+    }
+
+    function syncHljs(mode) {
+      var light = document.getElementById("hljs-theme-light");
+      var dark = document.getElementById("hljs-theme-dark");
+      if (!light || !dark) return;
+      if (mode === "dark") {
+        light.disabled = true;
+        dark.disabled = false;
+      } else {
+        light.disabled = false;
+        dark.disabled = true;
+      }
+    }
+
+    function render() {
+      var mode = effectiveTheme();
+      btn.setAttribute("aria-pressed", mode === "dark" ? "true" : "false");
+      btn.innerHTML = mode === "dark" ? moonSvg : sunSvg;
+      syncHljs(mode);
+    }
+
+    btn.addEventListener("click", function (e) {
+      // Shift+click = reset to system preference
+      if (e && e.shiftKey) {
+        document.documentElement.removeAttribute("data-theme");
+        try { localStorage.removeItem("thypress-theme"); } catch (err) {}
+        render();
+        return;
+      }
+
+      var mode = effectiveTheme();
+      var next = mode === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try { localStorage.setItem("thypress-theme", next); } catch (err) {}
+      render();
+    });
+
+    try {
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+        var forced = document.documentElement.getAttribute("data-theme");
+        if (forced !== "light" && forced !== "dark") render();
+      });
+    } catch (e) {}
+
+    render();
+  })();
+</script>
