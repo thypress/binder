@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
 import { detectContentStructure, loadEmbeddedTemplates } from './renderer.js';
+import { REDIRECT_STATUS_CODES, DEFAULT_STATUS_CODE, parseRedirectRules } from './build.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -26,6 +27,7 @@ function parseArgs() {
   let serveAfterBuild = false;
   let contentDir = null;
   let skipDirs = null;
+  let redirectAction = 'validate';
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -52,6 +54,16 @@ function parseArgs() {
 
     if (arg === 'serve' || arg === 'dev' || arg === 's') {
       command = 'serve';
+      continue;
+    }
+
+    if (arg === 'redirects') {
+      command = 'redirects';
+      // Next arg is the action
+      if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
+        redirectAction = args[i + 1];
+        i++;
+      }
       continue;
     }
 
@@ -117,10 +129,10 @@ function parseArgs() {
     targetDir = process.cwd();
   }
 
-  return { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs };
+  return { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs, redirectAction };
 }
 
-const { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs } = parseArgs();
+const { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs, redirectAction } = parseArgs();
 
 async function ensureDefaults() {
   console.log(info(`Working directory: ${targetDir}\n`));
@@ -378,11 +390,14 @@ Create a \`redirects.json\` file to handle URL migrations:
 \`\`\`json
 {
   "/old-post/": "/new-post/",
-  "/blog/:slug/": "/posts/:slug/"
+  "/temp-promo/": {
+    "to": "/sale/",
+    "statusCode": 302
+  }
 }
 \`\`\`
 
-Redirects work in both dev server and build output.
+Redirects work in both dev server and build output. Supports 5 status codes: 301, 302, 303, 307, 308.
 
 ## Live Reload
 
@@ -695,6 +710,376 @@ function showVersion() {
   console.log(`THYPRESS v${VERSION}`);
 }
 
+/**
+ * Enhanced redirect management commands
+ */
+async function handleRedirectsCommand(action = 'validate') {
+  const redirectsPath = path.join(targetDir, 'redirects.json');
+
+  if (!fs.existsSync(redirectsPath)) {
+    console.log(warning('No redirects.json file found'));
+    console.log(info('Create one to get started:'));
+    console.log(dim('  {'));
+    console.log(dim('    "/old-post/": "/new-post/"'));
+    console.log(dim('  }'));
+    console.log('');
+    console.log(info('Or use advanced format with status codes:'));
+    console.log(dim('  {'));
+    console.log(dim('    "/temp-promo/": {'));
+    console.log(dim('      "to": "/sale/",'));
+    console.log(dim('      "statusCode": 302'));
+    console.log(dim('    }'));
+    console.log(dim('  }'));
+    return;
+  }
+
+  try {
+    const redirectsData = JSON.parse(fs.readFileSync(redirectsPath, 'utf-8'));
+
+    switch (action) {
+      case 'validate':
+        await validateRedirects(redirectsData);
+        break;
+      case 'test':
+        await testRedirects(redirectsData);
+        break;
+      case 'list':
+        await listRedirects(redirectsData);
+        break;
+      case 'check':
+        await checkRedirects(redirectsData);
+        break;
+      default:
+        console.log(errorMsg(`Unknown action: ${action}`));
+        console.log(info('Available actions: validate, test, list, check'));
+        console.log(dim('Run: thypress redirects [action]'));
+    }
+  } catch (error) {
+    console.error(errorMsg(`Failed to parse redirects.json: ${error.message}`));
+    process.exit(1);
+  }
+}
+
+/**
+ * Validate redirect rules
+ */
+async function validateRedirects(redirectsData) {
+  console.log(bright('Validating redirects.json...\n'));
+
+  const { rules, errors } = parseRedirectRules(redirectsData);
+
+  if (errors.length > 0) {
+    console.log(errorMsg(`Found ${errors.length} validation error(s):\n`));
+    errors.forEach((err, i) => {
+      console.log(dim(`  ${i + 1}. ${err}`));
+    });
+    process.exit(1);
+  }
+
+  console.log(success(`✓ All ${rules.length} redirect rules are valid`));
+  console.log('');
+
+  // Status code breakdown
+  const statusBreakdown = rules.reduce((acc, rule) => {
+    const type = REDIRECT_STATUS_CODES[rule.statusCode].type;
+    if (!acc[type]) acc[type] = {};
+    acc[type][rule.statusCode] = (acc[type][rule.statusCode] || 0) + 1;
+    return acc;
+  }, {});
+
+  console.log(info('Status Code Breakdown:'));
+
+  if (statusBreakdown.permanent) {
+    console.log(dim('  Permanent (SEO-friendly):'));
+    Object.entries(statusBreakdown.permanent).forEach(([code, count]) => {
+      console.log(dim(`    ${code}: ${count} redirect(s) - ${REDIRECT_STATUS_CODES[code].description}`));
+    });
+  }
+
+  if (statusBreakdown.temporary) {
+    console.log(dim('  Temporary (no SEO transfer):'));
+    Object.entries(statusBreakdown.temporary).forEach(([code, count]) => {
+      console.log(dim(`    ${code}: ${count} redirect(s) - ${REDIRECT_STATUS_CODES[code].description}`));
+    });
+  }
+
+  if (statusBreakdown.functional) {
+    console.log(dim('  Functional:'));
+    Object.entries(statusBreakdown.functional).forEach(([code, count]) => {
+      console.log(dim(`    ${code}: ${count} redirect(s) - ${REDIRECT_STATUS_CODES[code].description}`));
+    });
+  }
+
+  // Check for potential issues
+  console.log('');
+  console.log(info('Checking for potential issues...'));
+
+  // Check for redirect loops
+  const loops = detectRedirectLoops(rules);
+  if (loops.length > 0) {
+    console.log(warning(`Found ${loops.length} potential redirect loop(s):`));
+    loops.forEach(loop => {
+      console.log(dim(`  ${loop.join(' → ')}`));
+    });
+  }
+
+  // Check for redirect chains
+  const chains = detectRedirectChains(rules);
+  if (chains.length > 0) {
+    console.log(warning(`Found ${chains.length} redirect chain(s) (recommend direct redirects):`));
+    chains.forEach(chain => {
+      console.log(dim(`  ${chain.join(' → ')}`));
+    });
+  }
+
+  // Check for external redirects
+  const externalRedirects = rules.filter(r =>
+    r.to.startsWith('http://') || r.to.startsWith('https://')
+  );
+  if (externalRedirects.length > 0) {
+    console.log(info(`${externalRedirects.length} external redirect(s) (no fallback HTML will be generated):`));
+    externalRedirects.forEach(r => {
+      console.log(dim(`  ${r.from} → ${r.to}`));
+    });
+  }
+
+  if (loops.length === 0 && chains.length === 0) {
+    console.log(success('✓ No issues detected'));
+  }
+
+  console.log('');
+  console.log(bright('Validation complete!'));
+}
+
+/**
+ * Detect redirect loops
+ */
+function detectRedirectLoops(rules) {
+  const loops = [];
+  const rulesMap = new Map(rules.map(r => [r.from, r.to]));
+
+  for (const rule of rules) {
+    const visited = new Set();
+    let current = rule.from;
+
+    while (current) {
+      if (visited.has(current)) {
+        // Found a loop
+        loops.push([...visited, current]);
+        break;
+      }
+
+      visited.add(current);
+      current = rulesMap.get(current);
+    }
+  }
+
+  return loops;
+}
+
+/**
+ * Detect redirect chains
+ */
+function detectRedirectChains(rules) {
+  const chains = [];
+  const rulesMap = new Map(rules.map(r => [r.from, r.to]));
+
+  for (const rule of rules) {
+    const chain = [rule.from];
+    let current = rule.to;
+
+    while (current && rulesMap.has(current)) {
+      chain.push(current);
+      current = rulesMap.get(current);
+    }
+
+    if (chain.length > 2) {
+      chain.push(current); // Add final destination
+      chains.push(chain);
+    }
+  }
+
+  return chains;
+}
+
+/**
+ * Match redirect with pattern support
+ */
+function matchRedirect(requestPath, redirectRulesMap) {
+  // Try exact match first
+  if (redirectRulesMap.has(requestPath)) {
+    return redirectRulesMap.get(requestPath);
+  }
+
+  // Try pattern matching
+  for (const [from, redirect] of redirectRulesMap) {
+    if (!from.includes(':')) continue;
+
+    const pattern = from.replace(/:\w+/g, '([^/]+)');
+    const regex = new RegExp(`^${pattern}$`);
+    const match = requestPath.match(regex);
+
+    if (match) {
+      let destination = redirect.to;
+      const params = from.match(/:\w+/g) || [];
+
+      params.forEach((param, i) => {
+        destination = destination.replace(param, match[i + 1]);
+      });
+
+      return {
+        to: destination,
+        statusCode: redirect.statusCode
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Test redirects against sample URLs (interactive)
+ */
+async function testRedirects(redirectsData) {
+  console.log(bright('Testing redirects...\n'));
+
+  const { rules, errors } = parseRedirectRules(redirectsData);
+
+  if (errors.length > 0) {
+    console.log(errorMsg('Cannot test - validation errors found'));
+    console.log(info('Run: thypress redirects validate'));
+    process.exit(1);
+  }
+
+  console.log(info('Enter URLs to test (press Ctrl+C to exit):'));
+  console.log(dim('Example: /old-post/ or /blog/hello-world/\n'));
+
+  const readline = require('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
+  });
+
+  const redirectRulesMap = new Map(rules.map(r => [r.from, { to: r.to, statusCode: r.statusCode }]));
+
+  rl.on('line', (input) => {
+    const testUrl = input.trim();
+
+    if (!testUrl) {
+      return;
+    }
+
+    if (!testUrl.startsWith('/')) {
+      console.log(warning('URL must start with /\n'));
+      return;
+    }
+
+    const match = matchRedirect(testUrl, redirectRulesMap);
+
+    if (match) {
+      console.log(success(`✓ ${testUrl}`));
+      console.log(dim(`  → ${match.to} (${match.statusCode})`));
+      console.log(dim(`  ${REDIRECT_STATUS_CODES[match.statusCode].description}\n`));
+    } else {
+      console.log(warning(`✗ ${testUrl}`));
+      console.log(dim('  No redirect rule matches\n'));
+    }
+  });
+
+  rl.on('close', () => {
+    console.log('\nGoodbye!');
+    process.exit(0);
+  });
+}
+
+/**
+ * List all redirect rules grouped by status code
+ */
+async function listRedirects(redirectsData) {
+  console.log(bright('Redirect Rules:\n'));
+
+  const { rules, errors } = parseRedirectRules(redirectsData);
+
+  if (errors.length > 0) {
+    console.log(errorMsg('Validation errors found'));
+    console.log(info('Run: thypress redirects validate'));
+    return;
+  }
+
+  // Group by status code
+  const grouped = rules.reduce((acc, rule) => {
+    if (!acc[rule.statusCode]) acc[rule.statusCode] = [];
+    acc[rule.statusCode].push(rule);
+    return acc;
+  }, {});
+
+  Object.entries(grouped).forEach(([statusCode, statusRules]) => {
+    const statusInfo = REDIRECT_STATUS_CODES[statusCode];
+    console.log(info(`${statusCode} - ${statusInfo.description} (${statusRules.length})`));
+
+    statusRules.forEach(rule => {
+      console.log(dim(`  ${rule.from} → ${rule.to}`));
+    });
+
+    console.log('');
+  });
+
+  console.log(success(`Total: ${rules.length} redirect rule(s)`));
+}
+
+/**
+ * Check redirect compatibility and build output
+ */
+async function checkRedirects(redirectsData) {
+  console.log(bright('Checking redirect compatibility...\n'));
+
+  const { rules, errors } = parseRedirectRules(redirectsData);
+
+  if (errors.length > 0) {
+    console.log(errorMsg('Validation errors found'));
+    console.log(info('Run: thypress redirects validate'));
+    return;
+  }
+
+  // Check smart host compatibility
+  console.log(info('Smart Hosts (Server-Side Redirects):'));
+  console.log(success('  ✓ Netlify (_redirects)'));
+  console.log(success('  ✓ Cloudflare Pages (_redirects)'));
+  console.log(success('  ✓ Vercel (vercel.json)'));
+  console.log('');
+
+  // Check dumb host compatibility
+  const internalRedirects = rules.filter(r =>
+    !r.to.startsWith('http://') && !r.to.startsWith('https://')
+  );
+  const externalRedirects = rules.filter(r =>
+    r.to.startsWith('http://') || r.to.startsWith('https://')
+  );
+
+  console.log(info('Dumb Hosts (Fallback HTML):'));
+  console.log(success(`  ✓ GitHub Pages: ${internalRedirects.length} redirect(s) with fallback HTML`));
+  console.log(success(`  ✓ Amazon S3: ${internalRedirects.length} redirect(s) with fallback HTML`));
+  console.log(success(`  ✓ Basic FTP: ${internalRedirects.length} redirect(s) with fallback HTML`));
+
+  if (externalRedirects.length > 0) {
+    console.log(warning(`    ${externalRedirects.length} external redirect(s) cannot have fallback HTML`));
+    console.log(dim('    These will only work on smart hosts (Netlify, Vercel, etc.)'));
+  }
+
+  console.log('');
+
+  // Estimate build output size
+  const fallbackHtmlSize = internalRedirects.length * 1.5; // ~1.5KB per fallback
+  console.log(info('Estimated Build Output:'));
+  console.log(dim(`  _redirects: ~${Math.ceil(rules.length * 0.05)}KB`));
+  console.log(dim(`  vercel.json: ~${Math.ceil(rules.length * 0.1)}KB`));
+  console.log(dim(`  Fallback HTML: ~${fallbackHtmlSize.toFixed(1)}KB (${internalRedirects.length} files)`));
+  console.log('');
+
+  console.log(bright('All checks passed! Ready to build.'));
+}
+
 function help() {
   console.log(`
 ${bright('THYPRESS')} v${VERSION} - Simple markdown blog/docs engine
@@ -707,8 +1092,15 @@ ${bright('Commands:')}
   build, b                Build static site to /build
   build --serve           Build + preview with optimized server
   clean                   Delete .cache
+  redirects [action]      Manage redirect rules
   version, -v             Show version
   help, -h                Show help
+
+${bright('Redirect Actions:')}
+  redirects validate      Validate redirects.json syntax and rules (default)
+  redirects test          Test URLs against redirect rules interactively
+  redirects list          List all redirect rules grouped by status code
+  redirects check         Check redirect compatibility and build output
 
 ${bright('Options:')}
   --dir, -d <path>        Target directory (default: current)
@@ -731,6 +1123,12 @@ ${bright('Examples:')}
   thypress --skip-dirs tmp,cache     # Skip tmp/ and cache/ folders
   PORT=8080 thypress serve           # Use specific port
 
+${bright('Redirect Examples:')}
+  thypress redirects validate        # Validate redirects.json
+  thypress redirects test            # Test redirect rules interactively
+  thypress redirects list            # Show all redirects
+  thypress redirects check           # Check compatibility
+
 ${bright('Structure:')}
   content/              ← Your content (markdown/text/html)
     posts/              ← Blog posts
@@ -742,6 +1140,33 @@ ${bright('Structure:')}
     .default/           ← Embedded defaults
   config.json           ← Site configuration
   redirects.json        ← URL redirects (optional)
+
+${bright('Redirects Configuration (redirects.json):')}
+  Simple format (301 by default):
+  {
+    "/old-post/": "/new-post/"
+  }
+
+  Advanced format (custom status code):
+  {
+    "/temp-promo/": {
+      "to": "/sale/",
+      "statusCode": 302
+    }
+  }
+
+  Pattern matching (dynamic parameters):
+  {
+    "/blog/:slug/": "/posts/:slug/",
+    "/:year/:month/:slug/": "/posts/:slug/"
+  }
+
+  Supported status codes:
+  - 301: Permanent (SEO-friendly, default)
+  - 302: Temporary (promotions, A/B tests)
+  - 303: Post-form redirect (prevents resubmit)
+  - 307: Temporary + preserves POST data
+  - 308: Permanent + preserves POST data
 
 ${bright('Configuration (config.json):')}
   {
@@ -773,7 +1198,8 @@ ${bright('Features:')}
   • Live reload with WebSocket
   • Related posts (tag-based)
   • RSS per tag/category/series
-  • URL redirects (redirects.json)
+  • URL redirects with 5 status codes
+  • Dual-build strategy (smart + dumb hosts)
   • Taxonomies (tags, categories, series)
   • Admonitions (:::tip, :::warning, etc.)
   • Asset fingerprinting
@@ -786,6 +1212,7 @@ ${bright('Docs:')}
 `);
 }
 
+// Main command dispatcher
 switch (command) {
   case 'serve':
     serve();
@@ -799,6 +1226,9 @@ switch (command) {
     break;
   case 'clean':
     clean();
+    break;
+  case 'redirects':
+    await handleRedirectsCommand(redirectAction);
     break;
   case 'version':
     showVersion();

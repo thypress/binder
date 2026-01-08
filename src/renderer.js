@@ -5,7 +5,7 @@
  // ✅ Auto-generates embedded-templates.js
  // ```
 
- // ### ⚠️ Stale Detection
+ // ### !️ Stale Detection
  // ```bash
  // # Edit template source
  // vim templates/.default/post.html
@@ -55,7 +55,7 @@
  // # Test 2: Stale detection
  // touch templates/.default/post.html
  // bun src/cli.js serve
- // # Should warn ⚠️
+ // # Should warn !️
 
  // # Test 3: Disabled auto-gen
  // rm src/embedded-templates.js
@@ -394,7 +394,7 @@
    const admonitionTypes = {
      'note': { icon: 'ℹ️', class: 'admonition-note' },
      'tip': { icon: '💡', class: 'admonition-tip' },
-     'warning': { icon: '⚠️', class: 'admonition-warning' },
+     'warning': { icon: '!️', class: 'admonition-warning' },
      'danger': { icon: '🚨', class: 'admonition-danger' },
      'info': { icon: 'ℹ️', class: 'admonition-info' }
    };
@@ -992,7 +992,7 @@
        });
 
        if (contentFiles.length > 0) {
-         console.log(success(`Found ${contentFiles.length} content file${contentFiles.length !== 1 ? 's' : ''} in root`));
+         console.log(success(`Found ${contentFiles.length} content file(s) in root`));
          console.log(info('Using root directory as content (no dev folders detected)'));
          console.log(dim('  To use subdirectory: create content/ or add contentDir to config.json'));
 

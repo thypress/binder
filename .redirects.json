@@ -1,0 +1,58 @@
+{
+  "_comment": "THYPRESS Redirect Configuration",
+  "_note": "Remove all _comment, _note, _section keys before deploying",
+
+  "_section_1": "========== SIMPLE FORMAT ==========",
+  "_note_1": "Uses default 301 (permanent) status code - Best for SEO",
+
+  "/old-post/": "/new-post/",
+  "/about-us/": "/about/",
+  "/contact-page/": "/contact/",
+
+  "_section_2": "========== ADVANCED FORMAT ==========",
+
+  "_subsection_1": "--- Permanent Redirects (301) ---",
+  "/blog/2024-01-15-hello-world/": {
+    "to": "/posts/hello-world/",
+    "statusCode": 301
+  },
+
+  "_subsection_2": "--- Temporary Redirects (302) ---",
+  "_use_case_1": "Holiday promotion (remove after Dec 31)",
+  "/": {
+    "to": "/holiday-sale/",
+    "statusCode": 302
+  },
+
+  "_subsection_3": "--- Post-Form Redirects (303) ---",
+  "/contact-form-submit/": {
+    "to": "/contact-success/",
+    "statusCode": 303
+  },
+
+  "_section_3": "========== PATTERN MATCHING ==========",
+  "_note_2": "Use :param for dynamic URL segments",
+
+  "/blog/:slug/": "/posts/:slug/",
+  "/:year/:month/:day/:slug/": "/posts/:slug/",
+  "/category/:category/:slug/": "/posts/:slug/",
+
+  "_section_4": "========== EXTERNAL REDIRECTS ==========",
+  "_note_3": "Redirect to external domains",
+
+  "/twitter/": {
+    "to": "https://twitter.com/yourhandle",
+    "statusCode": 301
+  },
+  "/github/": {
+    "to": "https://github.com/yourusername",
+    "statusCode": 301
+  },
+
+  "_section_5": "========== STATUS CODE REFERENCE ==========",
+  "_301": "Permanent - Best for SEO, passes link equity",
+  "_302": "Temporary - For promotions, no SEO transfer",
+  "_303": "Post-form redirect - Prevents resubmit",
+  "_307": "Temporary + preserves POST data",
+  "_308": "Permanent + preserves POST data"
+}
