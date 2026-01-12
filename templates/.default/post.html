@@ -12,14 +12,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   hasPostsList=false
   showFooterLinks=false
 }}
-
-  <p><a href="/">Back</a></p>
-  <hr>
-
-  <div class="meta">
-    {{createdAt}}{{#if readingTime}} · {{readingTime}} min read{{/if}}{{#if wordCount}} · {{wordCount}} words{{/if}}
+  <div class="posts-info">
+    <time>{{createdAt}}</time>{{#if readingTime}} · {{readingTime}} min read{{/if}}{{#if wordCount}} · {{wordCount}} words{{/if}}
     {{#unless (eq createdAt updatedAt)}}
-     · Updated: {{updatedAt}}
+     · Updated: <time>{{updatedAt}}</time>
     {{/unless}}
     {{#if tags}}
     <span class="tags">
@@ -43,15 +39,15 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   </article>
 
   {{#if relatedPosts}}{{#if relatedPosts.length}}
-  <aside class="related-posts">
+  <aside>
     <h2>Related Posts</h2>
     <ul>
       {{#each relatedPosts}}
       <li>
         <h3><a href="{{url}}">{{title}}</a></h3>
-        <div class="meta">{{date}}</div>
+        <time>{{date}}</time>
         {{#if description}}
-        <p class="description">{{description}}</p>
+        <p>{{description}}</p>
         {{/if}}
       </li>
       {{/each}}
@@ -62,12 +58,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   {{#if prevPost}}{{#if nextPost}}
   <nav class="post-nav">
     {{#if prevPost}}
-      <div class="post-nav-prev">
+      <div>
         <a href="{{prevPost.url}}">← {{prevPost.title}}</a>
       </div>
     {{/if}}
     {{#if nextPost}}
-      <div class="post-nav-next">
+      <div>
         <a href="{{nextPost.url}}">{{nextPost.title}} →</a>
       </div>
     {{/if}}

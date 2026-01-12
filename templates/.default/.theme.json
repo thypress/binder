@@ -1,0 +1,81 @@
+{
+  "_comment": "THYPRESS Theme Metadata - place in templates/your-theme/theme.json",
+
+  "name": "Modern Blog",
+  "version": "1.0.0",
+  "description": "A beautiful, feature-rich theme for modern blogs",
+  "author": "Your Name <you@example.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/yourname/modern-blog-theme",
+  "repository": "https://github.com/yourname/modern-blog-theme",
+
+  "preview": "preview.png",
+
+  "tags": [
+    "modern",
+    "minimal",
+    "dark-mode",
+    "responsive",
+    "blog"
+  ],
+
+  "requires": [
+    "navigation",
+    "content",
+    "siteTitle",
+    "toc",
+    "tags",
+    "categories",
+    "series",
+    "relatedPosts",
+    "prevPost",
+    "nextPost",
+    "pagination",
+    "wordCount",
+    "readingTime"
+  ],
+
+  "_note": "Available features in THYPRESS 0.2.0+:",
+  "_features": {
+    "core": [
+      "navigation",
+      "content",
+      "siteTitle",
+      "siteDescription",
+      "siteUrl",
+      "author"
+    ],
+    "content_metadata": [
+      "title",
+      "date",
+      "createdAt",
+      "updatedAt",
+      "description",
+      "slug",
+      "url"
+    ],
+    "features": [
+      "tags",
+      "toc",
+      "pagination",
+      "posts",
+      "tag",
+      "categories",
+      "series",
+      "category",
+      "relatedPosts",
+      "wordCount",
+      "readingTime",
+      "ogImage"
+    ],
+    "navigation": [
+      "prevPost",
+      "nextPost"
+    ],
+    "context_flags": [
+      "isArticle",
+      "hasPostsList",
+      "showToc"
+    ]
+  }
+}

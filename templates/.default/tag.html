@@ -13,19 +13,15 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
   hasPostsList=true
   showFooterLinks=false
 }}
-
-  <p><a href="/">Back</a></p>
-  <hr>
-
   <h1>Tag: {{tag}}</h1>
 
   <ul class="posts" id="posts-list">
     {{#each posts}}
     <li>
       <h3><a href="{{url}}">{{title}}</a></h3>
-      <div class="meta">{{date}}</div>
+      <time>{{date}}</time>
       {{#if description}}
-      <p class="description">{{description}}</p>
+      <p>{{description}}</p>
       {{/if}}
     </li>
     {{/each}}

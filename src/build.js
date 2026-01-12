@@ -891,7 +891,73 @@ export async function build() {
 
   const { contentCache, navigation, imageReferences, brokenImages, mode, contentRoot } = loadAllContent();
   const siteConfig = getSiteConfig();
-  const { templatesCache, themeAssets, activeTheme } = await loadTheme(siteConfig.theme);
+  // Validate theme before building
+  const themeResult = await loadTheme(siteConfig.theme);
+  const { templatesCache, themeAssets, activeTheme, validation } = themeResult;
+
+  // Check validation (skip for .default)
+  if (activeTheme !== '.default' && validation && !validation.valid) {
+    console.log('');
+    console.error(errorMsg(`  Theme "${activeTheme}" validation failed`));
+    console.log('');
+
+    // Show errors
+    if (validation.errors.length > 0) {
+      console.log(errorMsg('Errors:'));
+      validation.errors.forEach(err => {
+        console.log(dim(`  • ${err}`));
+      });
+      console.log('');
+    }
+
+    // Show warnings
+    if (validation.warnings.length > 0) {
+      console.log(warning('Warnings:'));
+      validation.warnings.forEach(warn => {
+        console.log(dim(`  • ${warn}`));
+      });
+      console.log('');
+    }
+
+    console.log(info('Fix:'));
+    console.log(dim('  1. Fix the errors listed above'));
+    console.log(dim('  2. Set forceTheme: true in config.json to build anyway (not recommended)'));
+    console.log(dim('  3. Switch to a different theme in config.json'));
+    console.log('');
+
+    // Check forceTheme
+    if (siteConfig.forceTheme !== true) {
+      console.log(errorMsg('Build aborted due to theme validation errors'));
+      process.exit(1);
+    } else {
+      console.log(warning('  forceTheme enabled - building with broken theme'));
+      console.log(warning('Site may have rendering errors or broken pages'));
+      console.log('');
+    }
+  }
+
+  // Show warnings even for valid themes
+  if (validation && validation.warnings.length > 0) {
+    console.log(warning(`Theme "${activeTheme}" has warnings:`));
+    validation.warnings.forEach(warn => {
+      console.log(dim(`  • ${warn}`));
+    });
+    console.log('');
+  }
+
+  // Validate critical templates
+  if (!templatesCache.has('index')) {
+    console.log(errorMsg('Missing required template: index.html'));
+    return;
+  }
+
+  if (!templatesCache.has('post')) {
+    console.log(errorMsg('Missing required template: post.html'));
+    return;
+  }
+
+  console.log(success('✓ Theme validation passed'));
+
 
   if (contentCache.size === 0) {
     console.log(warning('No content found in content directory'));

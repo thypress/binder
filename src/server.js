@@ -34,12 +34,15 @@ import {
   getAllCategories,
   getAllSeries,
   loadEmbeddedTemplates,
-  slugify
+  slugify,
+
+  scanAvailableThemes,
+  setActiveTheme,
+  THYPRESS_FEATURES
 } from './renderer.js';
 import { optimizeToCache, CACHE_DIR } from './build.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const START_PORT = 3009;
 const MAX_PORT_TRIES = 100;
 const DEBOUNCE_DELAY = 500;
@@ -521,20 +524,87 @@ function scheduleImageOptimization() {
   }, DEBOUNCE_DELAY);
 }
 
+// REPLACE the existing reloadTheme() function in server.js with this safe version:
+
 async function reloadTheme() {
   const config = getSiteConfig();
-  const result = await loadTheme(config.theme);
-  templatesCache = result.templatesCache;
-  themeAssets = result.themeAssets;
-  activeTheme = result.activeTheme;
 
-  dynamicContentCache.delete('404.html');
+  try {
+    console.log(info(`Loading theme: ${config.theme || 'auto-detect'}...`));
 
-  await preRenderAllContent();
-  await preCompressContent();
+    // Load into TEMPORARY variables
+    const newTheme = await loadTheme(config.theme);
 
-  // FEATURE 1: Notify live reload clients
-  broadcastReload();
+    // VALIDATE before replacing (skip for .default)
+    if (newTheme.activeTheme && newTheme.activeTheme !== '.default' && newTheme.validation && !newTheme.validation.valid) {
+      console.log('');
+      console.error(errorMsg(`❌ Theme "${newTheme.activeTheme}" validation failed`));
+      console.log('');
+
+      // Show errors
+      if (newTheme.validation.errors.length > 0) {
+        console.log(errorMsg('Errors:'));
+        newTheme.validation.errors.forEach(err => {
+          console.log(dim(`  • ${err}`));
+        });
+        console.log('');
+      }
+
+      // Show warnings
+      if (newTheme.validation.warnings.length > 0) {
+        console.log(warning('Warnings:'));
+        newTheme.validation.warnings.forEach(warn => {
+          console.log(dim(`  • ${warn}`));
+        });
+        console.log('');
+      }
+
+      // Check forceTheme config
+      if (config.forceTheme !== true) {
+        console.log(info('Fix:'));
+        console.log(dim('  1. Fix the errors listed above'));
+        console.log(dim('  2. Set forceTheme: true in config.json (not recommended)'));
+        console.log(dim('  3. Switch to a different theme'));
+        console.log('');
+        console.log(warning('  Keeping previous working theme loaded'));
+        return; // ← ABORT reload, keep old theme
+      } else {
+        console.log('');
+        console.log(warning('  forceTheme enabled - loading broken theme anyway'));
+        console.log(warning('Pages may fail to render or show errors'));
+        console.log('');
+      }
+    }
+
+    // Show warnings even for valid themes
+    if (newTheme.validation && newTheme.validation.warnings.length > 0) {
+      console.log(warning(`Theme "${newTheme.activeTheme}" has warnings:`));
+      newTheme.validation.warnings.forEach(warn => {
+        console.log(dim(`  • ${warn}`));
+      });
+      console.log('');
+    }
+
+    // ONLY NOW replace global state (validation passed or forced)
+    templatesCache = newTheme.templatesCache;
+    themeAssets = newTheme.themeAssets;
+    activeTheme = newTheme.activeTheme;
+
+    dynamicContentCache.delete('404.html');
+
+    await preRenderAllContent();
+    await preCompressContent();
+
+    console.log(success(`✓ Theme "${activeTheme}" loaded successfully`));
+    broadcastReload();
+
+  } catch (error) {
+    console.log('');
+    console.error(errorMsg(`Failed to reload theme: ${error.message}`));
+    console.log(warning('  Keeping previous theme loaded'));
+    console.log('');
+    // Don't crash server, keep old theme
+  }
 }
 
 // FEATURE 1: Live reload broadcast
@@ -674,6 +744,35 @@ contentMode = initialLoad.mode;
 contentRoot = initialLoad.contentRoot;
 
 await reloadTheme();
+// Validate critical templates are loaded
+if (!templatesCache.has('index')) {
+  console.log('');
+  console.error(errorMsg('FATAL: Missing required template: index.html'));
+  console.log('');
+  console.log(info('The active theme must provide index.html'));
+  console.log(dim('Fix:'));
+  console.log(dim('  1. Add index.html to your theme'));
+  console.log(dim('  2. Switch theme in config.json'));
+  console.log(dim('  3. Set theme: ".default" to use embedded theme'));
+  console.log('');
+  process.exit(1);
+}
+
+if (!templatesCache.has('post')) {
+  console.log('');
+  console.error(errorMsg('FATAL: Missing required template: post.html'));
+  console.log('');
+  console.log(info('The active theme must provide post.html'));
+  console.log(dim('Fix:'));
+  console.log(dim('  1. Add post.html to your theme'));
+  console.log(dim('  2. Switch theme in config.json'));
+  console.log(dim('  3. Set theme: ".default" to use embedded theme'));
+  console.log('');
+  process.exit(1);
+}
+
+console.log(success('✓ Theme validation passed'));
+
 loadRedirects();
 
 if (!isOptimizingImages && imageReferences.size > 0) {
@@ -874,6 +973,87 @@ Bun.serve({
         return Response.redirect(redirectUrl, statusCode);
       }
 
+      // Get available themes
+      if (route === '/__thypress/themes' && request.method === 'GET') {
+        const themes = scanAvailableThemes();
+        const activeThemeId = siteConfig.theme || activeTheme || 'my-press';
+
+        // Mark active theme
+        themes.forEach(theme => {
+          theme.active = theme.id === activeThemeId;
+        });
+
+        return new Response(JSON.stringify(themes), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Get THYPRESS features registry
+      if (route === '/__thypress/features' && request.method === 'GET') {
+        return new Response(JSON.stringify(THYPRESS_FEATURES), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Set active theme with validation
+      if (route === '/__thypress/themes/set' && request.method === 'POST') {
+        try {
+          const body = await request.json();
+          const { themeId } = body;
+
+          if (!themeId) {
+            return new Response(JSON.stringify({
+              success: false,
+              error: 'themeId required'
+            }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+
+          // PRE-VALIDATE theme before committing
+          console.log(info(`Validating theme: ${themeId}...`));
+
+          const testTheme = await loadTheme(themeId);
+
+          // Check validation (skip for .default)
+          if (testTheme.activeTheme !== '.default' && testTheme.validation && !testTheme.validation.valid) {
+            return new Response(JSON.stringify({
+              success: false,
+              error: 'Theme validation failed',
+              errors: testTheme.validation.errors,
+              warnings: testTheme.validation.warnings
+            }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+
+          // Validation passed - safe to activate
+          setActiveTheme(themeId);
+          siteConfig = getSiteConfig(); // Reload config
+
+          await reloadTheme();
+
+          return new Response(JSON.stringify({
+            success: true,
+            message: `Theme "${themeId}" activated`,
+            theme: themeId,
+            warnings: testTheme.validation?.warnings || []
+          }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: error.message
+          }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+
       // Admin page
       if (route === '/__thypress/' || route === '/__thypress') {
         const htmlFiles = Array.from(contentCache.values()).filter(c => c.type === 'html');
@@ -924,12 +1104,13 @@ Bun.serve({
   <style>
     body {
       font-family: monospace, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      max-width: 800px;
+      max-width: 1200px;
       margin: 0 auto;
       padding: 2rem;
       line-height: 1.6;
     }
     h1 { color: #2a2a2a; }
+    h2 { margin-top: 2rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; }
     .stats {
       background: #f9f9f9;
       padding: 20px;
@@ -948,12 +1129,18 @@ Bun.serve({
       font-size: 16px;
       cursor: pointer;
       margin: 10px 10px 10px 0;
-      font-family: monospace, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: inherit;
     }
     .button:hover { background: #982c61; }
     .button:disabled {
       background: #ccc;
       cursor: not-allowed;
+    }
+    .button-secondary {
+      background: #666;
+    }
+    .button-secondary:hover {
+      background: #444;
     }
     #status {
       margin: 20px 0;
@@ -976,11 +1163,152 @@ Bun.serve({
       color: #d32f2f;
       display: block;
     }
+    #status.warning {
+      background: #fff3e0;
+      color: #f57c00;
+      display: block;
+    }
     .back {
       color: #1d7484;
       text-decoration: none;
     }
     .back:hover { text-decoration: underline; }
+
+    /* Theme Management Styles */
+    .theme-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 1.5rem;
+      margin: 2rem 0;
+    }
+    .theme-card {
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      padding: 1.25rem;
+      background: white;
+      transition: all 0.2s;
+    }
+    .theme-card:hover {
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    .theme-card.active {
+      border-color: #1d7484;
+      background: #f0f9fa;
+    }
+    .theme-card.invalid {
+      border-color: #d32f2f;
+      background: #fff5f5;
+      opacity: 0.8;
+    }
+    .theme-preview {
+      width: 100%;
+      height: 140px;
+      background: #e0e0e0;
+      border-radius: 4px;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #999;
+      font-size: 0.9rem;
+      overflow: hidden;
+    }
+    .theme-preview img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: cover;
+    }
+    .theme-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      margin-bottom: 0.5rem;
+      gap: 0.5rem;
+    }
+    .theme-name {
+      font-weight: 600;
+      font-size: 1.1rem;
+      margin: 0;
+      flex: 1;
+    }
+    .theme-badges {
+      display: flex;
+      gap: 0.35rem;
+      flex-shrink: 0;
+    }
+    .theme-badge {
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-active {
+      background: #1d7484;
+      color: white;
+    }
+    .badge-embedded {
+      background: #666;
+      color: white;
+    }
+    .badge-invalid {
+      background: #d32f2f;
+      color: white;
+    }
+    .theme-meta {
+      font-size: 0.85rem;
+      color: #666;
+      margin: 0.5rem 0;
+    }
+    .theme-description {
+      font-size: 0.9rem;
+      color: #555;
+      margin: 0.75rem 0;
+      line-height: 1.4;
+      min-height: 2.8em;
+    }
+    .theme-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin: 0.75rem 0;
+      min-height: 1.5rem;
+    }
+    .theme-tag {
+      padding: 0.2rem 0.5rem;
+      background: #e0e0e0;
+      border-radius: 12px;
+      font-size: 0.7rem;
+    }
+    .theme-requires {
+      font-size: 0.8rem;
+      color: #666;
+      margin: 0.75rem 0;
+      padding: 0.5rem;
+      background: #f5f5f5;
+      border-radius: 4px;
+    }
+    .theme-error {
+      color: #d32f2f;
+      font-size: 0.85rem;
+      margin-top: 0.75rem;
+      padding: 0.5rem;
+      background: #ffebee;
+      border-radius: 4px;
+    }
+    .theme-actions {
+      margin-top: 1rem;
+      display: flex;
+      gap: 0.5rem;
+    }
+    .theme-link {
+      font-size: 0.85rem;
+      color: #1d7484;
+      text-decoration: none;
+    }
+    .theme-link:hover {
+      text-decoration: underline;
+    }
   </style>
 </head>
 <body>
@@ -1002,21 +1330,142 @@ Bun.serve({
     <p><strong>Server:</strong> http://localhost:${port}</p>
   </div>
 
-  ${htmlFilesTable}
+  <h2>Theme Management</h2>
+  <div id="themes-container">
+    <p>Loading themes...</p>
+  </div>
 
   <h2>Build Static Site</h2>
   <p>Generate a complete static build in /build folder for deployment.</p>
 
   <button id="buildBtn" class="button" onclick="buildSite()">Build Static Site</button>
-  <button id="clearCacheBtn" class="button" onclick="clearCache()">Clear Cache</button>
+  <button id="clearCacheBtn" class="button button-secondary" onclick="clearCache()">Clear Cache</button>
 
   <div id="status"></div>
 
   <script>
+    let themes = [];
+
     function setStatus(message, type) {
       const status = document.getElementById('status');
       status.textContent = message;
       status.className = type;
+    }
+
+    async function loadThemes() {
+      try {
+        const response = await fetch('/__thypress/themes');
+        themes = await response.json();
+        renderThemes();
+      } catch (error) {
+        document.getElementById('themes-container').innerHTML =
+          '<p style="color: #d32f2f;">Failed to load themes: ' + error.message + '</p>';
+      }
+    }
+
+    function renderThemes() {
+      const container = document.getElementById('themes-container');
+
+      if (themes.length === 0) {
+        container.innerHTML = '<p>No themes found</p>';
+        return;
+      }
+
+      container.innerHTML = '<div class="theme-grid">' + themes.map(theme => {
+        const activeClass = theme.active ? 'active' : '';
+        const invalidClass = !theme.valid ? 'invalid' : '';
+
+        return \`
+          <div class="theme-card \${activeClass} \${invalidClass}">
+            <div class="theme-preview">
+              \${theme.preview
+                ? '<img src="/templates/' + theme.id + '/' + theme.preview + '" alt="' + theme.name + ' preview">'
+                : 'No preview'}
+            </div>
+
+            <div class="theme-header">
+              <h3 class="theme-name">\${theme.name}</h3>
+              <div class="theme-badges">
+                \${theme.active ? '<span class="theme-badge badge-active">ACTIVE</span>' : ''}
+                \${theme.embedded ? '<span class="theme-badge badge-embedded">EMBEDDED</span>' : ''}
+                \${!theme.valid ? '<span class="theme-badge badge-invalid">INVALID</span>' : ''}
+              </div>
+            </div>
+
+            <div class="theme-meta">
+              <strong>Version:</strong> \${theme.version} |
+              <strong>By:</strong> \${theme.author}
+            </div>
+
+            <p class="theme-description">\${theme.description}</p>
+
+            \${theme.tags && theme.tags.length > 0 ? \`
+              <div class="theme-tags">
+                \${theme.tags.map(tag => '<span class="theme-tag">' + tag + '</span>').join('')}
+              </div>
+            \` : '<div class="theme-tags"></div>'}
+
+            \${theme.requires && theme.requires.length > 0 ? \`
+              <div class="theme-requires">
+                <strong>Requires:</strong> \${theme.requires.join(', ')}
+              </div>
+            \` : ''}
+
+            \${!theme.valid && theme.error ? \`
+              <div class="theme-error">
+                [fail] \${theme.error}
+              </div>
+            \` : ''}
+
+            <div class="theme-actions">
+              \${!theme.active && theme.valid ? \`
+                <button class="button" onclick="activateTheme('\${theme.id}')">
+                  Activate Theme
+                </button>
+              \` : ''}
+
+              \${theme.homepage ? \`
+                <a href="\${theme.homepage}" target="_blank" class="theme-link">Homepage →</a>
+              \` : ''}
+            </div>
+          </div>
+        \`;
+      }).join('') + '</div>';
+    }
+
+    async function activateTheme(themeId) {
+      setStatus('Validating and activating theme...', 'info');
+
+      try {
+        const response = await fetch('/__thypress/themes/set', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ themeId })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          let message = 'Theme activated: ' + themeId;
+          if (data.warnings && data.warnings.length > 0) {
+            message += ' (with warnings - check console)';
+          }
+          message += '. Reloading...';
+          setStatus(message, 'success');
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          let errorMsg = 'Failed to activate theme: ' + data.error;
+          if (data.errors && data.errors.length > 0) {
+            errorMsg += '\\n\\nErrors:\\n' + data.errors.join('\\n');
+          }
+          if (data.warnings && data.warnings.length > 0) {
+            errorMsg += '\\n\\nWarnings:\\n' + data.warnings.join('\\n');
+          }
+          setStatus(errorMsg, 'error');
+        }
+      } catch (error) {
+        setStatus('Failed to activate theme: ' + error.message, 'error');
+      }
     }
 
     async function buildSite() {
@@ -1050,7 +1499,7 @@ Bun.serve({
         const data = await response.json();
 
         if (data.success) {
-          setStatus('Cache cleared! Freed ' + data.freed + ' items.', 'success');
+          setStatus('Cache cleared! Freed ' + data.freed + ' items. Reloading...', 'success');
           setTimeout(() => location.reload(), 1000);
         } else {
           setStatus('Clear cache failed: ' + data.error, 'error');
@@ -1061,6 +1510,9 @@ Bun.serve({
         btn.disabled = false;
       }
     }
+
+    // Load themes on page load
+    loadThemes();
   </script>
 </body>
 </html>`;

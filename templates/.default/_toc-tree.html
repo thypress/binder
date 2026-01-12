@@ -14,10 +14,7 @@ use <nav> tags, add classes, etc. All presentation is in your control.
   <li>
     <a href="#{{slug}}" data-heading-id="{{slug}}">{{content}}</a>
     {{#if children.length}}
-      <details open>
-        <summary></summary>
         {{> _toc-tree items=children}}
-      </details>
     {{/if}}
   </li>
 {{/each}}
