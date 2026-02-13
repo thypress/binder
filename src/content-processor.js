@@ -859,6 +859,166 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
  * Detect content structure and determine mode
  * Now accepts explicit mode from CLI intent system
  */
+// export function detectContentStructure(workingDir, options = {}) {
+//   const {
+//     cliContentDir = null,
+//     cliSkipDirs = null,
+//     intentMode = null,
+//     intentContentRoot = null
+//   } = options;
+
+//   console.log(dim(`Detecting content structure in: ${workingDir}`));
+
+//   // ========================================================================
+//   // PRIORITY 1: Intent system override
+//   // If CLI has already determined mode and contentRoot, use it directly
+//   // ========================================================================
+//   if (intentMode && intentContentRoot) {
+//     console.log(info(`Using intent-determined mode: ${intentMode}`));
+//     console.log(info(`Content root: ${intentContentRoot}`));
+
+//     return {
+//       contentRoot: intentContentRoot,
+//       mode: intentMode,
+//       shouldInit: false
+//     };
+//   }
+
+//   // ========================================================================
+//   // PRIORITY 2: Check config.json for custom contentDir
+//   // ========================================================================
+//   let config = {};
+//   try {
+//     const configPath = path.join(workingDir, 'config.json');
+//     if (fs.existsSync(configPath)) {
+//       config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+//       if (config.contentDir) {
+//         const customContentDir = path.join(workingDir, config.contentDir);
+
+//         if (fs.existsSync(customContentDir)) {
+//           console.log(success(`Using custom content directory from config: ${config.contentDir}/`));
+
+//           return {
+//             contentRoot: customContentDir,
+//             mode: 'viewer',
+//             customDir: config.contentDir
+//           };
+//         } else {
+//           console.log(warning(`Config specifies contentDir "${config.contentDir}" but directory not found`));
+//         }
+//       }
+//     }
+//   } catch (error) {
+//     // No config file or parse error - continue
+//   }
+
+//   // ========================================================================
+//   // PRIORITY 3: Check for CLI --content-dir flag
+//   // ========================================================================
+//   if (cliContentDir) {
+//     const cliContentPath = path.join(workingDir, cliContentDir);
+
+//     if (fs.existsSync(cliContentPath)) {
+//       console.log(success(`Using content directory from --content-dir flag: ${cliContentDir}/`));
+
+//       return {
+//         contentRoot: cliContentPath,
+//         mode: 'viewer'
+//       };
+//     } else {
+//       console.log(warning(`CLI flag --content-dir "${cliContentDir}" specified but directory not found`));
+//     }
+//   }
+
+//   // ========================================================================
+//   // PRIORITY 4: Check for default content/ directory
+//   // ========================================================================
+//   const defaultContentDir = path.join(workingDir, 'content');
+//   if (fs.existsSync(defaultContentDir) && fs.statSync(defaultContentDir).isDirectory()) {
+//     console.log(success('Found content/ directory'));
+
+//     return {
+//       contentRoot: defaultContentDir,
+//       mode: 'viewer'
+//     };
+//   }
+
+//   // ========================================================================
+//   // PRIORITY 5: Build skip directory list
+//   // ========================================================================
+//   let skipDirs = [...DEFAULT_SKIP_DIRS.filter(d => d !== 'templates')];
+
+//   if (cliSkipDirs) {
+//     skipDirs = [...skipDirs, ...cliSkipDirs];
+//   }
+
+//   if (config.skipDirs && Array.isArray(config.skipDirs)) {
+//     skipDirs = [...skipDirs, ...config.skipDirs];
+//   }
+
+//   skipDirs = [...new Set(skipDirs)];
+
+//   const hasSkippedDirs = skipDirs.some(dir => {
+//     const dirPath = path.join(workingDir, dir);
+//     return fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory();
+//   });
+
+//   // ========================================================================
+//   // PRIORITY 6: Check for root content files
+//   // ========================================================================
+//   try {
+//     const files = fs.readdirSync(workingDir);
+//     const contentFiles = files.filter(f => {
+//       if (shouldIgnore(f)) return false;
+//       const fullPath = path.join(workingDir, f);
+//       try {
+//         if (!fs.statSync(fullPath).isFile()) return false;
+//       } catch {
+//         return false;
+//       }
+//       return /\.(md|txt|html)$/i.test(f);
+//     });
+
+//     if (contentFiles.length > 0) {
+//       console.log(success(`Found ${contentFiles.length} content file(s) in root`));
+//       console.log(info('Using root directory as content (viewer mode)'));
+//       console.log(dim('Tip: Create content/ folder for organized projects'));
+
+//       return {
+//         contentRoot: workingDir,
+//         mode: 'viewer',
+//         rootContent: true
+//       };
+//     }
+//   } catch (error) {
+//     console.log(warning(`Could not scan root directory: ${error.message}`));
+//   }
+
+//   // ========================================================================
+//   // PRIORITY 7: No content found - needs initialization
+//   // ========================================================================
+//   if (hasSkippedDirs) {
+//     const detectedDirs = skipDirs
+//       .filter(dir => fs.existsSync(path.join(workingDir, dir)))
+//       .slice(0, 3);
+
+//     console.log(warning(`Development folders detected: ${detectedDirs.join(', ')}`));
+//     console.log(info('Content should be in content/ or set contentDir in config.json'));
+//   }
+
+//   console.log(warning('No content directory or files found'));
+//   console.log(info('Will initialize project structure'));
+
+//   return {
+//     contentRoot: defaultContentDir,
+//     mode: 'project',
+//     shouldInit: true
+//   };
+// }
+// PROPERLY CORRECTED VERSION of detectContentStructure()
+// Replace lines 862-1018 in content-processor.js with this
+
 export function detectContentStructure(workingDir, options = {}) {
   const {
     cliContentDir = null,
@@ -871,7 +1031,6 @@ export function detectContentStructure(workingDir, options = {}) {
 
   // ========================================================================
   // PRIORITY 1: Intent system override
-  // If CLI has already determined mode and contentRoot, use it directly
   // ========================================================================
   if (intentMode && intentContentRoot) {
     console.log(info(`Using intent-determined mode: ${intentMode}`));
@@ -885,7 +1044,73 @@ export function detectContentStructure(workingDir, options = {}) {
   }
 
   // ========================================================================
-  // PRIORITY 2: Check config.json for custom contentDir
+  // PRIORITY 2: Check for root content files (IMPROVED WITH DEV PROJECT DETECTION)
+  // ========================================================================
+  // ONLY use root as content if:
+  // 1. It has content files OR content subdirs (pages/, docs/, etc.)
+  // 2. AND it's NOT a development project (no node_modules/, package.json, etc.)
+  // 3. AND it doesn't already have a content/ subdirectory
+  try {
+    const entries = fs.readdirSync(workingDir);
+
+    // Check if this is a development project (DON'T use as content!)
+    const isDevelopmentProject = entries.some(e => {
+      return ['node_modules', 'package.json', 'package-lock.json', 'bun.lock',
+              '.git', 'tsconfig.json', 'vite.config.js', 'webpack.config.js'].includes(e);
+    });
+
+    // Check if content/ subdirectory already exists (use that instead!)
+    const hasContentSubdir = entries.includes('content') &&
+                              fs.statSync(path.join(workingDir, 'content')).isDirectory();
+
+    // Only proceed if NOT a dev project AND no content/ subdir
+    if (!isDevelopmentProject && !hasContentSubdir) {
+      // Check for content files directly in root
+      const contentFiles = entries.filter(f => {
+        if (shouldIgnore(f)) return false;
+        const fullPath = path.join(workingDir, f);
+        try {
+          if (!fs.statSync(fullPath).isFile()) return false;
+        } catch {
+          return false;
+        }
+        return /\.(md|txt|html)$/i.test(f);
+      });
+
+      // Check for common content subdirectory patterns
+      const hasContentDirs = entries.some(e => {
+        const fullPath = path.join(workingDir, e);
+        try {
+          return fs.statSync(fullPath).isDirectory() &&
+                 ['pages', 'docs', 'posts', 'articles', 'guides', 'blog'].includes(e.toLowerCase());
+        } catch {
+          return false;
+        }
+      });
+
+      // Return if EITHER files OR content subdirs are found
+      if (contentFiles.length > 0 || hasContentDirs) {
+        if (contentFiles.length > 0) {
+          console.log(success(`Found ${contentFiles.length} content file(s) in root`));
+        }
+        if (hasContentDirs) {
+          console.log(success('Folder contains content files'));
+        }
+        console.log(info('Using root directory as content (viewer mode)'));
+
+        return {
+          contentRoot: workingDir,
+          mode: 'viewer',
+          rootContent: true
+        };
+      }
+    }
+  } catch (error) {
+    console.log(warning(`Could not scan root directory: ${error.message}`));
+  }
+
+  // ========================================================================
+  // PRIORITY 3: Check config.json for custom contentDir
   // ========================================================================
   let config = {};
   try {
@@ -914,7 +1139,7 @@ export function detectContentStructure(workingDir, options = {}) {
   }
 
   // ========================================================================
-  // PRIORITY 3: Check for CLI --content-dir flag
+  // PRIORITY 4: Check for CLI --content-dir flag
   // ========================================================================
   if (cliContentDir) {
     const cliContentPath = path.join(workingDir, cliContentDir);
@@ -932,7 +1157,7 @@ export function detectContentStructure(workingDir, options = {}) {
   }
 
   // ========================================================================
-  // PRIORITY 4: Check for default content/ directory
+  // PRIORITY 5: Check for default content/ directory
   // ========================================================================
   const defaultContentDir = path.join(workingDir, 'content');
   if (fs.existsSync(defaultContentDir) && fs.statSync(defaultContentDir).isDirectory()) {
@@ -945,7 +1170,7 @@ export function detectContentStructure(workingDir, options = {}) {
   }
 
   // ========================================================================
-  // PRIORITY 5: Build skip directory list
+  // PRIORITY 6: Build skip directory list
   // ========================================================================
   let skipDirs = [...DEFAULT_SKIP_DIRS.filter(d => d !== 'templates')];
 
@@ -963,37 +1188,6 @@ export function detectContentStructure(workingDir, options = {}) {
     const dirPath = path.join(workingDir, dir);
     return fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory();
   });
-
-  // ========================================================================
-  // PRIORITY 6: Check for root content files
-  // ========================================================================
-  try {
-    const files = fs.readdirSync(workingDir);
-    const contentFiles = files.filter(f => {
-      if (shouldIgnore(f)) return false;
-      const fullPath = path.join(workingDir, f);
-      try {
-        if (!fs.statSync(fullPath).isFile()) return false;
-      } catch {
-        return false;
-      }
-      return /\.(md|txt|html)$/i.test(f);
-    });
-
-    if (contentFiles.length > 0) {
-      console.log(success(`Found ${contentFiles.length} content file(s) in root`));
-      console.log(info('Using root directory as content (viewer mode)'));
-      console.log(dim('Tip: Create content/ folder for organized projects'));
-
-      return {
-        contentRoot: workingDir,
-        mode: 'viewer',
-        rootContent: true
-      };
-    }
-  } catch (error) {
-    console.log(warning(`Could not scan root directory: ${error.message}`));
-  }
 
   // ========================================================================
   // PRIORITY 7: No content found - needs initialization

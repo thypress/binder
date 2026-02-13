@@ -140,9 +140,9 @@ export const ROUTES = {
   ADMIN: '/__thypress/',
   ADMIN_BASE: '/__thypress',
   ADMIN_THEMES: '/__thypress/themes',
-  ADMIN_THEMES_SET: '/__thypress/themes/set',
   ADMIN_BUILD: '/__thypress/build',
   ADMIN_CLEAR_CACHE: '/__thypress/clear-cache',
+  ADMIN_CONFIG: '/__thypress/api/config',
   LIVE_RELOAD: '/__live_reload',
   ASSETS: '/assets/',
   TAG: '/tag/',
@@ -225,12 +225,12 @@ function getMimeType(filePath) {
  * @param {string} html - HTML content
  * @returns {string} HTML with injected script
  */
-function injectLiveReloadScript(html) {
+function injectLiveReloadScript(html, siteConfig) {
   // Only inject in DYNAMIC mode (thypress serve)
   // We strictly skip this in 'static' or 'static_preview' modes
-  if (process.env.THYPRESS_MODE !== 'dynamic') {
-    return html;
-  }
+  if (process.env.THYPRESS_MODE !== 'dynamic') return html;
+  // or when it is intentionally flagged in configurations
+  if (siteConfig?.disableLiveReload === true) return html;
 
   const script = `
 <script>
@@ -617,11 +617,11 @@ async function handleMeta(route, request, { contentCache, siteConfig, cacheManag
 
     case `/${CACHE_KEYS.robotsTxt}`:
     case `/${CACHE_KEYS.llmsTxt}`:
-      const { themeAssets, activeTheme } = await getThemeAssets();
+      const { themeAssets: metaThemeAssets } = await getThemeAssets();
       const filename = route.substring(1);
 
-      if (themeAssets.has(filename)) {
-        const asset = themeAssets.get(filename);
+      if (metaThemeAssets.has(filename)) {
+        const asset = metaThemeAssets.get(filename);
         if (asset.type === 'template') {
           content = asset.compiled({
             siteUrl: siteConfig.url || 'https://example.com',
@@ -630,17 +630,9 @@ async function handleMeta(route, request, { contentCache, siteConfig, cacheManag
         } else {
           content = asset.content;
         }
-      } else if (siteConfig.strictThemeIsolation !== true) {
-        const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
-        if (EMBEDDED_TEMPLATES[filename]) {
-          const Handlebars = await import('handlebars');
-          const template = Handlebars.default.compile(EMBEDDED_TEMPLATES[filename]);
-          content = template({
-            siteUrl: siteConfig.url || 'https://example.com',
-            ...siteConfig
-          });
-        }
       } else {
+        // Only reached when strictThemeIsolation=true and disk theme
+        // provides no robots.txt / llms.txt — hardcoded minimal fallback
         content = route === `/${CACHE_KEYS.robotsTxt}`
           ? `User-agent: *\nAllow: /\n\nSitemap: ${siteConfig.url || 'https://example.com'}/sitemap.xml\n`
           : `# ${siteConfig.title || 'My Site'}\n\n> ${siteConfig.description || 'A site powered by THYPRESS'}\n\n## Sitemap\n${siteConfig.url || 'https://example.com'}/sitemap.xml\n`;
@@ -685,7 +677,7 @@ async function handleTagPage(tag, request, {
   if (preRendered) {
     metrics.serverCacheHits++;
     // Always attempt injection on cached HTML in case we just switched to dynamic mode
-    const html = injectLiveReloadScript(preRendered);
+    const html = injectLiveReloadScript(preRendered, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   }
 
@@ -698,7 +690,7 @@ async function handleTagPage(tag, request, {
     cacheManager.renderedCache.set(cacheKey, rawHtml);
 
     // Inject script and serve
-    const html = injectLiveReloadScript(rawHtml);
+    const html = injectLiveReloadScript(rawHtml, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   } catch (error) {
     return new Response(`Error: ${error.message}`, { status: HTTP_STATUS.SERVER_ERROR });
@@ -732,7 +724,7 @@ async function handleCategoryPage(category, request, {
   const preRendered = cacheManager.renderedCache.get(cacheKey);
   if (preRendered) {
     metrics.serverCacheHits++;
-    const html = injectLiveReloadScript(preRendered);
+    const html = injectLiveReloadScript(preRendered, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   }
 
@@ -742,7 +734,7 @@ async function handleCategoryPage(category, request, {
 
     cacheManager.renderedCache.set(cacheKey, rawHtml);
 
-    const html = injectLiveReloadScript(rawHtml);
+    const html = injectLiveReloadScript(rawHtml, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   } catch (error) {
     return new Response(`Error: ${error.message}`, { status: HTTP_STATUS.SERVER_ERROR });
@@ -777,7 +769,7 @@ async function handleSeriesPage(seriesSlug, request, {
   const preRendered = cacheManager.renderedCache.get(cacheKey);
   if (preRendered) {
     metrics.serverCacheHits++;
-    const html = injectLiveReloadScript(preRendered);
+    const html = injectLiveReloadScript(preRendered, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   }
 
@@ -826,7 +818,7 @@ async function handlePagination(page, request, {
   const preRendered = cacheManager.renderedCache.get(cacheKey);
   if (preRendered) {
     metrics.serverCacheHits++;
-    const html = injectLiveReloadScript(preRendered);
+    const html = injectLiveReloadScript(preRendered, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   }
 
@@ -836,7 +828,7 @@ async function handlePagination(page, request, {
 
     cacheManager.renderedCache.set(cacheKey, rawHtml);
 
-    const html = injectLiveReloadScript(rawHtml);
+    const html = injectLiveReloadScript(rawHtml, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   } catch (error) {
     return new Response(`Error: ${error.message}`, { status: HTTP_STATUS.SERVER_ERROR });
@@ -871,7 +863,7 @@ function handleHomepage(request, {
       const preRendered = cacheManager.renderedCache.get(siteConfig.index);
       if (preRendered) {
         metrics.serverCacheHits++;
-        const html = injectLiveReloadScript(preRendered);
+        const html = injectLiveReloadScript(preRendered, siteConfig);
         return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
       }
 
@@ -884,7 +876,7 @@ function handleHomepage(request, {
       }
 
       cacheManager.renderedCache.set(siteConfig.index, rawHtml);
-      const html = injectLiveReloadScript(rawHtml);
+      const html = injectLiveReloadScript(rawHtml, siteConfig);
       return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
     }
   }
@@ -901,7 +893,7 @@ function handleHomepage(request, {
     const preRendered = cacheManager.renderedCache.get('index');
     if (preRendered) {
       metrics.serverCacheHits++;
-      const html = injectLiveReloadScript(preRendered);
+      const html = injectLiveReloadScript(preRendered, siteConfig);
       return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
     }
 
@@ -914,7 +906,7 @@ function handleHomepage(request, {
     }
 
     cacheManager.renderedCache.set('index', rawHtml);
-    const html = injectLiveReloadScript(rawHtml);
+    const html = injectLiveReloadScript(rawHtml, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   }
 
@@ -929,7 +921,7 @@ function handleHomepage(request, {
   const preRendered = cacheManager.renderedCache.get(cacheKey);
   if (preRendered) {
     metrics.serverCacheHits++;
-    const html = injectLiveReloadScript(preRendered);
+    const html = injectLiveReloadScript(preRendered, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   }
 
@@ -937,7 +929,7 @@ function handleHomepage(request, {
   const rawHtml = renderEntryList(contentCache, 1, templatesCache, navigation, siteConfig, themeMetadata);
 
   cacheManager.renderedCache.set(cacheKey, rawHtml);
-  const html = injectLiveReloadScript(rawHtml);
+  const html = injectLiveReloadScript(rawHtml, siteConfig);
   return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
 }
 
@@ -967,7 +959,7 @@ function handleEntryPage(entry, slug, request, {
   const preRendered = cacheManager.renderedCache.get(slug);
   if (preRendered) {
     metrics.serverCacheHits++;
-    const html = injectLiveReloadScript(preRendered);
+    const html = injectLiveReloadScript(preRendered, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   }
 
@@ -981,7 +973,7 @@ function handleEntryPage(entry, slug, request, {
     }
 
     cacheManager.renderedCache.set(slug, rawHtml);
-    const html = injectLiveReloadScript(rawHtml);
+    const html = injectLiveReloadScript(rawHtml, siteConfig);
     return cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
   } catch (error) {
     return new Response(`Error: ${error.message}`, { status: HTTP_STATUS.SERVER_ERROR });
@@ -998,10 +990,9 @@ async function handle404(request, deps) {
   const { cacheManager, templatesCache, navigation, siteConfig, themeMetadata } = deps;
   const cacheKey = CACHE_KEYS.notFound;
 
-  // Check if already cached
   if (cacheManager.dynamicContentCache.has(cacheKey)) {
     const cached = cacheManager.dynamicContentCache.get(cacheKey);
-    const html = injectLiveReloadScript(cached.content);
+    const html = injectLiveReloadScript(cached.content, siteConfig);
     const response = await cacheManager.serveWithCache(html, MIME_TYPES.HTML, request);
     return new Response(response.body, {
       status: HTTP_STATUS.NOT_FOUND,
@@ -1011,11 +1002,11 @@ async function handle404(request, deps) {
 
   let html404 = null;
 
-  // PRIORITY 1: Check if theme has compiled 404 template
+  // PRIORITY 1: templatesCache always has '404' unless strictThemeIsolation=true
+  //             and the disk theme provides no 404.html
   if (templatesCache.has('404')) {
     try {
       const template = templatesCache.get('404');
-      // Use the EXISTING template context builder!
       const context = buildTemplateContext('404', {}, siteConfig, navigation, themeMetadata);
       html404 = template(context);
     } catch (error) {
@@ -1023,38 +1014,8 @@ async function handle404(request, deps) {
     }
   }
 
-  // PRIORITY 2: Use embedded 404 template (compile it first!)
-  if (!html404 && siteConfig.strictThemeIsolation !== true) {
-    try {
-      const EMBEDDED_TEMPLATES = await loadEmbeddedTemplates();
-      if (EMBEDDED_TEMPLATES['404.html']) {
-        const Handlebars = await import('handlebars');
-
-        // Register _layout partial if not already registered
-        if (!Handlebars.default.partials['_layout'] && EMBEDDED_TEMPLATES['_layout.html']) {
-          Handlebars.default.registerPartial('_layout', EMBEDDED_TEMPLATES['_layout.html']);
-        }
-
-        // Register other required partials
-        const requiredPartials = ['_head', '_sidebar-nav', '_sidebar-toc', '_search-dialog', '_minisearch', '_nav-tree', '_toc-tree'];
-        for (const partialName of requiredPartials) {
-          const partialFile = `${partialName}.html`;
-          if (!Handlebars.default.partials[partialName] && EMBEDDED_TEMPLATES[partialFile]) {
-            Handlebars.default.registerPartial(partialName, EMBEDDED_TEMPLATES[partialFile]);
-          }
-        }
-
-        const template = Handlebars.default.compile(EMBEDDED_TEMPLATES['404.html']);
-        // Use the EXISTING template context builder!
-        const context = buildTemplateContext('404', {}, siteConfig, navigation, themeMetadata);
-        html404 = template(context);
-      }
-    } catch (error) {
-      console.error(`Error compiling embedded 404 template: ${error.message}`);
-    }
-  }
-
-  // PRIORITY 3: Absolute fallback (bare minimum HTML)
+  // PRIORITY 2: Absolute fallback
+  // Only reached when strictThemeIsolation=true and disk theme has no 404.html
   if (!html404) {
     html404 = `<!DOCTYPE html>
 <html lang="en">
@@ -1071,11 +1032,9 @@ async function handle404(request, deps) {
 </html>`;
   }
 
-  // Cache the rendered 404
   cacheManager.dynamicContentCache.set(cacheKey, { content: html404 });
 
-  // Inject live reload and serve
-  const htmlWithReload = injectLiveReloadScript(html404);
+  const htmlWithReload = injectLiveReloadScript(html404, siteConfig);
   const response = await cacheManager.serveWithCache(htmlWithReload, MIME_TYPES.HTML, request);
   return new Response(response.body, {
     status: HTTP_STATUS.NOT_FOUND,
@@ -1157,11 +1116,14 @@ async function handleAdmin(request, deps) {
   // Get available themes
   if (route === ROUTES.ADMIN_THEMES && request.method === 'GET') {
     const { scanAvailableThemes } = await import('./theme-system.js');
+    const { DEFAULT_THEME_ID } = await import('./embedded-templates.js');
     const themes = scanAvailableThemes();
     const activeThemeId = deps.siteConfig.theme || deps.activeTheme || 'my-press';
+    const defaultThemeId = deps.siteConfig.defaultTheme || DEFAULT_THEME_ID;
 
     themes.forEach(theme => {
-      theme.active = theme.id === activeThemeId;
+      theme.active    = theme.id === activeThemeId;
+      theme.isDefault = theme.id === defaultThemeId;
     });
 
     return new Response(JSON.stringify(themes), {
@@ -1169,49 +1131,92 @@ async function handleAdmin(request, deps) {
     });
   }
 
-  // Set active theme
-  if (route === ROUTES.ADMIN_THEMES_SET && request.method === 'POST') {
+  // Generic config setter — handles all theme-related config keys
+  if (route === ROUTES.ADMIN_CONFIG && request.method === 'POST') {
     try {
       const body = await request.json();
-      const { themeId } = body;
+      const { key, value } = body;
 
-      if (!themeId) {
+      const ALLOWED_KEYS = ['theme', 'defaultTheme'];
+      if (!key || !ALLOWED_KEYS.includes(key)) {
         return new Response(JSON.stringify({
           success: false,
-          error: 'themeId required'
+          error: `Invalid key. Allowed keys: ${ALLOWED_KEYS.join(', ')}`
         }), {
           status: HTTP_STATUS.BAD_REQUEST,
           headers: { 'Content-Type': MIME_TYPES.JSON }
         });
       }
 
-      const { loadTheme, setActiveTheme } = await import('./theme-system.js');
-
-      const testTheme = await loadTheme(themeId);
-
-      if (testTheme.activeTheme !== '.default' && testTheme.validation && !testTheme.validation.valid) {
+      if (!value) {
         return new Response(JSON.stringify({
           success: false,
-          error: 'Theme validation failed',
-          errors: testTheme.validation.errors,
-          warnings: testTheme.validation.warnings
+          error: 'value is required'
         }), {
           status: HTTP_STATUS.BAD_REQUEST,
           headers: { 'Content-Type': MIME_TYPES.JSON }
         });
       }
 
-      setActiveTheme(themeId);
-      deps.siteConfig = (await import('./utils/taxonomy.js')).getSiteConfig();
+      const { setThemeConfig, loadTheme } = await import('./theme-system.js');
 
-      return new Response(JSON.stringify({
-        success: true,
-        message: `Theme "${themeId}" activated`,
-        theme: themeId,
-        warnings: testTheme.validation?.warnings || []
-      }), {
-        headers: { 'Content-Type': MIME_TYPES.JSON }
-      });
+      // key-specific validation before writing
+      if (key === 'theme') {
+        // Full theme validation
+        const testTheme = await loadTheme(value);
+
+        if (testTheme.activeTheme !== '.default' && testTheme.validation && !testTheme.validation.valid) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'Theme validation failed',
+            errors: testTheme.validation.errors,
+            warnings: testTheme.validation.warnings
+          }), {
+            status: HTTP_STATUS.BAD_REQUEST,
+            headers: { 'Content-Type': MIME_TYPES.JSON }
+          });
+        }
+
+        setThemeConfig('theme', value);
+        deps.siteConfig = (await import('./utils/taxonomy.js')).getSiteConfig();
+
+        return new Response(JSON.stringify({
+          success: true,
+          message: `Theme activated: "${value}"`,
+          key,
+          value,
+          warnings: testTheme.validation?.warnings || []
+        }), {
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+
+      if (key === 'defaultTheme') {
+        // defaultTheme must always be an embedded theme — it is the safety net
+        const { EMBEDDED_TEMPLATES } = await import('./embedded-templates.js');
+        if (!Object.prototype.hasOwnProperty.call(EMBEDDED_TEMPLATES, value)) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: `"${value}" is not an embedded theme and cannot be used as fallback`
+          }), {
+            status: HTTP_STATUS.BAD_REQUEST,
+            headers: { 'Content-Type': MIME_TYPES.JSON }
+          });
+        }
+
+        setThemeConfig('defaultTheme', value);
+        deps.siteConfig = (await import('./utils/taxonomy.js')).getSiteConfig();
+
+        return new Response(JSON.stringify({
+          success: true,
+          message: `Fallback theme set to: "${value}"`,
+          key,
+          value
+        }), {
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+
     } catch (error) {
       return new Response(JSON.stringify({
         success: false,

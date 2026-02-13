@@ -302,6 +302,11 @@ export const ADMIN_STYLES = `
       color: var(--bg);
     }
 
+    .badge-default {
+      background: var(--accent-2);
+      color: var(--bg);
+    }
+
     .badge-embedded {
       background: var(--muted);
       color: var(--bg);
@@ -364,6 +369,7 @@ export function generateAdminHTML(deps) {
     <p><strong>Mode:</strong> ${deps.contentMode}</p>
     <p><strong>Content root:</strong> ${deps.contentRoot}</p>
     <p><strong>Active theme:</strong> ${deps.activeTheme || '.default (embedded)'}</p>
+    <p><strong>Fallback theme:</strong> ${deps.siteConfig.defaultTheme || '.default (binary)'}</p>
     <p><strong>Pre-rendered pages:</strong> ${deps.cacheManager.renderedCache.size}</p>
     <p><strong>Pre-compressed:</strong> ${deps.cacheManager.precompressedCache.size / 2} pages × 2 formats</p>
     <p><strong>Images cached:</strong> ${deps.imageReferences.size} files with images</p>
@@ -439,14 +445,17 @@ export function generateAdminHTML(deps) {
       }
 
       container.innerHTML = '<div class="theme-grid">' + themes.map(theme => {
-        const activeClass = theme.active ? 'active' : '';
-        const invalidClass = !theme.valid ? 'invalid' : '';
+        const activeClass  = theme.active   ? 'active'  : '';
+        const invalidClass = !theme.valid   ? 'invalid' : '';
+        // Only embedded/overridden themes can be the safety-net fallback;
+        // local-only disk themes are not bundled in the binary.
+        const canBeDefault = theme.type === 'embedded' || theme.type === 'overridden';
 
         // Build preview image HTML
         let previewHtml = '<div class="theme-preview">No preview</div>';
         if (theme.preview) {
-            const previewUrl = \`/__thypress/theme-preview/\${theme.id}/\${theme.preview}\`;
-            previewHtml = \`<img src="\${previewUrl}" alt="\${theme.name} preview" class="theme-preview-img" loading="lazy">\`;
+          const previewUrl = \`/__thypress/theme-preview/\${theme.id}/\${theme.preview}\`;
+          previewHtml = \`<img src="\${previewUrl}" alt="\${theme.name} preview" class="theme-preview-img" loading="lazy">\`;
         }
 
         return \`
@@ -456,9 +465,10 @@ export function generateAdminHTML(deps) {
             <div class="theme-header">
               <h3 class="theme-name">\${theme.name}</h3>
               <div class="theme-badges">
-                \${theme.active ? '<span class="theme-badge badge-active">ACTIVE</span>' : ''}
-                \${theme.embedded ? '<span class="theme-badge badge-embedded">EMBEDDED</span>' : ''}
-                \${!theme.valid ? '<span class="theme-badge badge-invalid">INVALID</span>' : ''}
+                \${theme.active    ? '<span class="theme-badge badge-active">ACTIVE</span>'     : ''}
+                \${theme.isDefault ? '<span class="theme-badge badge-default">FALLBACK</span>'  : ''}
+                \${theme.embedded  ? '<span class="theme-badge badge-embedded">EMBEDDED</span>' : ''}
+                \${!theme.valid    ? '<span class="theme-badge badge-invalid">INVALID</span>'   : ''}
               </div>
             </div>
 
@@ -475,6 +485,11 @@ export function generateAdminHTML(deps) {
                   Activate Theme
                 </button>
               \` : ''}
+              \${canBeDefault && !theme.isDefault ? \`
+                <button class="button button-secondary" onclick="setAsDefault('\${theme.id}')">
+                  Set as Fallback
+                </button>
+              \` : ''}
             </div>
           </div>
         \`;
@@ -485,10 +500,10 @@ export function generateAdminHTML(deps) {
       setStatus('Validating and activating theme...', 'info');
 
       try {
-        const response = await fetch('${ROUTES.ADMIN_THEMES_SET}', {
+        const response = await fetch('${ROUTES.ADMIN_CONFIG}', {
           method: 'POST',
           headers: { 'Content-Type': '${MIME_TYPES.JSON}' },
-          body: JSON.stringify({ themeId })
+          body: JSON.stringify({ key: 'theme', value: themeId })
         });
 
         const data = await response.json();
@@ -501,6 +516,29 @@ export function generateAdminHTML(deps) {
         }
       } catch (error) {
         setStatus('Failed to activate theme: ' + error.message, 'error');
+      }
+    }
+
+    async function setAsDefault(themeId) {
+      setStatus('Setting fallback theme...', 'info');
+
+      try {
+        const response = await fetch('${ROUTES.ADMIN_CONFIG}', {
+          method: 'POST',
+          headers: { 'Content-Type': '${MIME_TYPES.JSON}' },
+          body: JSON.stringify({ key: 'defaultTheme', value: themeId })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          setStatus('Fallback theme set to: ' + themeId + '. Reloading...', 'success');
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          setStatus('Failed to set fallback: ' + data.error, 'error');
+        }
+      } catch (error) {
+        setStatus('Failed to set fallback: ' + error.message, 'error');
       }
     }
 

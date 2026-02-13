@@ -88,144 +88,163 @@ function ensureBuildDir() {
   console.log(success('Build directory created'));
 }
 
-// Simplified template detection with helper function
-function renderTemplate(content, siteConfig, destPath, relPath, options = {}) {
-  try {
-    const template = Handlebars.compile(content);
-    const rendered = template({
-      siteUrl: siteConfig.url || 'https://example.com',
-      siteTitle: siteConfig.title || 'My Site',
-      siteDescription: siteConfig.description || 'A site powered by THYPRESS',
-      author: siteConfig.author || 'Anonymous',
-      ...siteConfig,
-      theme: siteConfig.theme || {}
-    });
-    fs.writeFileSync(destPath, rendered);
-    console.log(success(`Templated: ${relPath}`));
-    return true;
-  } catch (error) {
-    if (options.softFail) {
-      console.log(dim(`Skipped templating ${relPath}: ${error.message}`));
-      return false;
-    }
-    console.error(errorMsg(`Template error in ${relPath}: ${error.message}`));
-    process.exit(1);
-  }
-}
-
-// FEATURE 7: Asset fingerprinting
-const fingerprintCache = new Map();
-
-function generateFingerprint(filePath) {
-  if (fingerprintCache.has(filePath)) {
-    return fingerprintCache.get(filePath);
-  }
-
-  const content = fs.readFileSync(filePath);
-  const hash = crypto.createHash('md5').update(content).digest('hex').substring(0, 8);
-  fingerprintCache.set(filePath, hash);
-  return hash;
-}
-
 function copyThemeAssets(themeAssets, activeTheme, siteConfig) {
-  if (!activeTheme) {
-    console.log(info('No active theme, using embedded defaults'));
-    return;
+  if (!themeAssets || themeAssets.size === 0) {
+    console.log(info('No theme assets to copy'));
+    return new Map();
   }
 
-  const themePath = path.join(process.cwd(), 'templates', activeTheme);
-  const buildAssetsDir = path.join(BUILD_DIR, 'assets');
+  const SKIP_KEYS       = new Set(['robots.txt', 'llms.txt']);
+  const SKIP_EXTENSIONS = new Set(['.html', '.hbs', '.handlebars']);
 
-  if (!fs.existsSync(themePath)) {
-    console.log(warning(`Theme directory not found: ${themePath}`));
-    return;
-  }
+  const buildAssetsDir  = path.join(BUILD_DIR, 'assets');
+  const fingerprintMap  = new Map(); // original basename → fingerprinted basename
+  let count = 0;
 
-  fs.mkdirSync(buildAssetsDir, { recursive: true });
+  // ── Pass 1: compute all fingerprints up front ──────────────────────────────
+  // Must happen before any template is executed so that if a templated asset
+  // references another asset by name we have the full map ready.
+  if (siteConfig.fingerprintAssets) {
+    for (const [relPath, asset] of themeAssets) {
+      const ext = path.extname(relPath).toLowerCase();
+      if (SKIP_KEYS.has(relPath))       continue;
+      if (SKIP_EXTENSIONS.has(ext))     continue;
+      if (ext !== '.css' && ext !== '.js') continue;
 
-  function copyThemeFiles(dir, relativePath = '') {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+      try {
+        const rawContent = asset.type === 'template'
+          ? asset.compiled({
+              siteUrl:         siteConfig.url         || 'https://example.com',
+              siteTitle:       siteConfig.title        || 'My Site',
+              siteDescription: siteConfig.description  || 'A site powered by THYPRESS',
+              author:          siteConfig.author        || 'Anonymous',
+              ...siteConfig,
+              theme: siteConfig.theme || {}
+            })
+          : asset.content;
 
-    for (const entry of entries) {
-      if (shouldIgnore(entry.name)) continue;
-      if (entry.name.startsWith('_')) continue;
-      if (entry.name.endsWith('.html')) continue;
-      if (entry.isDirectory() && entry.name === 'partials') continue;
+        const buf    = Buffer.isBuffer(rawContent) ? rawContent : Buffer.from(rawContent);
+        const hash   = crypto.createHash('md5').update(buf).digest('hex').substring(0, 8);
+        const parsed = path.parse(relPath);
+        const fingerprintedName = `${parsed.name}.${hash}${parsed.ext}`;
 
-      const srcPath = path.join(dir, entry.name);
-      const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
-      const ext = path.extname(entry.name).toLowerCase();
-
-      if (entry.isDirectory()) {
-        copyThemeFiles(srcPath, relPath);
-      } else {
-        try {
-          const { data: frontMatter, content: fileContent } = matter(fs.readFileSync(srcPath, 'utf-8'));
-
-          fs.mkdirSync(path.dirname(path.join(buildAssetsDir, relPath)), { recursive: true });
-
-          // Priority 1 - Explicit front-matter
-          if (frontMatter.template === true) {
-            const destPath = path.join(buildAssetsDir, relPath);
-            renderTemplate(fileContent, siteConfig, destPath, relPath);
-            continue;
-          }
-
-          if (frontMatter.template === false) {
-            fs.copyFileSync(srcPath, path.join(buildAssetsDir, relPath));
-            continue;
-          }
-
-          // Priority 2 - Filename conventions
-          const isExplicitTemplate =
-            entry.name.startsWith('template-') ||
-            entry.name.endsWith('.hbs') ||
-            entry.name.endsWith('.handlebars');
-
-          if (isExplicitTemplate) {
-            const destPath = path.join(buildAssetsDir, relPath);
-            renderTemplate(fileContent, siteConfig, destPath, relPath);
-            continue;
-          }
-
-          // Priority 3 - Broad detection (opt-in)
-          if (siteConfig.discoverTemplates === true) {
-            const hasTemplateSyntax = fileContent.includes('{{') || fileContent.includes('{%');
-
-            if (hasTemplateSyntax && (ext === '.css' || ext === '.js' || ext === '.txt' || ext === '.xml')) {
-              const destPath = path.join(buildAssetsDir, relPath);
-              if (!renderTemplate(fileContent, siteConfig, destPath, relPath, { softFail: true })) {
-                fs.copyFileSync(srcPath, destPath);
-              }
-              continue;
-            }
-          }
-
-          // FEATURE 7: Asset fingerprinting for CSS/JS
-          if (siteConfig.fingerprintAssets && (ext === '.css' || ext === '.js')) {
-            const fingerprint = generateFingerprint(srcPath);
-            const parsedPath = path.parse(relPath);
-            const fingerprintedName = `${parsedPath.name}.${fingerprint}${parsedPath.ext}`;
-            const fingerprintedRelPath = path.join(parsedPath.dir, fingerprintedName);
-
-            fs.copyFileSync(srcPath, path.join(buildAssetsDir, fingerprintedRelPath));
-            console.log(success(`Fingerprinted: ${fingerprintedRelPath}`));
-          } else {
-            fs.copyFileSync(srcPath, path.join(buildAssetsDir, relPath));
-          }
-        } catch (error) {
-          // Binary file or malformed - treat as static
-          fs.mkdirSync(path.dirname(path.join(buildAssetsDir, relPath)), { recursive: true });
-          fs.copyFileSync(srcPath, path.join(buildAssetsDir, relPath));
-          console.log(dim(`Static: ${relPath} (${error.message})`));
-          continue;
-        }
+        // Key by basename only — asset references in HTML are always flat (/assets/style.css)
+        fingerprintMap.set(parsed.base, fingerprintedName);
+      } catch (err) {
+        console.log(warning(`Could not fingerprint "${relPath}": ${err.message}`));
       }
     }
   }
 
-  copyThemeFiles(themePath);
-  console.log(success(`Copied theme assets from ${activeTheme}/`));
+  // ── Pass 2: write all assets ───────────────────────────────────────────────
+  for (const [relPath, asset] of themeAssets) {
+    const ext = path.extname(relPath).toLowerCase();
+
+    if (SKIP_KEYS.has(relPath))   continue;
+    if (SKIP_EXTENSIONS.has(ext)) continue;
+
+    try {
+      let content;
+
+      if (asset.type === 'template') {
+        content = asset.compiled({
+          siteUrl:         siteConfig.url         || 'https://example.com',
+          siteTitle:       siteConfig.title        || 'My Site',
+          siteDescription: siteConfig.description  || 'A site powered by THYPRESS',
+          author:          siteConfig.author        || 'Anonymous',
+          ...siteConfig,
+          theme: siteConfig.theme || {}
+        });
+      } else {
+        content = asset.content;
+      }
+
+      // Resolve destination path — use fingerprinted name if available
+      const parsed      = path.parse(relPath);
+      const destBasename = fingerprintMap.get(parsed.base) || parsed.base;
+      const destRelPath  = parsed.dir
+        ? path.join(parsed.dir, destBasename)
+        : destBasename;
+
+      if (destBasename !== parsed.base) {
+        console.log(success(`Fingerprinted: ${destRelPath}`));
+      }
+
+      const destPath = path.join(buildAssetsDir, destRelPath);
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+
+      if (Buffer.isBuffer(content)) {
+        fs.writeFileSync(destPath, content);
+      } else {
+        fs.writeFileSync(destPath, content, 'utf-8');
+      }
+
+      count++;
+    } catch (err) {
+      console.log(warning(`Failed to write asset "${relPath}": ${err.message}`));
+    }
+  }
+
+  if (count > 0) {
+    console.log(success(`Copied ${count} theme assets`));
+  } else {
+    console.log(info('No deployable theme assets found'));
+  }
+
+  return fingerprintMap;
+}
+
+/**
+ * Post-process all HTML files in /build, rewriting asset references
+ * to their fingerprinted equivalents.
+ * Called only when fingerprintAssets=true and the map is non-empty.
+ *
+ * @param {Map<string, string>} fingerprintMap - original basename → fingerprinted basename
+ */
+function rewriteAssetReferences(fingerprintMap) {
+  let rewritten = 0;
+
+  function processDir(dir) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (shouldIgnore(entry.name)) continue;
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        processDir(fullPath);
+        continue;
+      }
+
+      if (path.extname(entry.name).toLowerCase() !== '.html') continue;
+
+      let content = fs.readFileSync(fullPath, 'utf-8');
+      let changed = false;
+
+      for (const [original, fingerprinted] of fingerprintMap) {
+        const from = `/assets/${original}`;
+        const to   = `/assets/${fingerprinted}`;
+
+        if (content.includes(from)) {
+          // split/join avoids regex escaping concerns with filenames
+          content = content.split(from).join(to);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        fs.writeFileSync(fullPath, content, 'utf-8');
+        rewritten++;
+      }
+    }
+  }
+
+  processDir(BUILD_DIR);
+
+  if (rewritten > 0) {
+    console.log(success(`Rewrote asset references in ${rewritten} HTML files`));
+  }
 }
 
 // Single loop image check
@@ -995,7 +1014,7 @@ export async function build() {
   const siteConfig = getSiteConfig();
 
   // Validate theme before building
-  const themeResult = await loadTheme(siteConfig.theme);
+  const themeResult = await loadTheme(siteConfig.theme, siteConfig);
   const { templatesCache, themeAssets, activeTheme, validation, themeMetadata } = themeResult;
 
   // Check validation (skip for .default)
@@ -1076,7 +1095,7 @@ export async function build() {
   }
 
   ensureBuildDir();
-  copyThemeAssets(themeAssets, activeTheme, siteConfig);
+  const fingerprintMap = copyThemeAssets(themeAssets, activeTheme, siteConfig);
 
   const imagesCount = await optimizeImagesFromContent(imageReferences, BUILD_DIR, true);
 
@@ -1093,6 +1112,12 @@ export async function build() {
   buildRedirects();
   copyStaticHtmlFiles(contentCache);
   copyStaticFilesFromContent(contentRoot);
+
+  // Rewrite asset references in all HTML files BEFORE compression
+  // so compressed variants contain the correct fingerprinted URLs
+  if (siteConfig.fingerprintAssets && fingerprintMap.size > 0) {
+    rewriteAssetReferences(fingerprintMap);
+  }
 
   // 7. Compression (Gzip/Brotli)
   console.log(info('Compressing assets...'));

@@ -141,6 +141,7 @@ vite.config.ts.timestamp-*
 
 # THYPRESS SECTION
 bun.lockb
+bun.lock
 .DS_Store
 src/embedded-templates.js
 thypress

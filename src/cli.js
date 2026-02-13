@@ -697,7 +697,6 @@ Happy writing! 🎉
         theme: 'my-press',
         strictThemeIsolation: false,
         forceTheme: false,
-        discoverTemplates: false,
         fingerprintAssets: false,
 
         // === Dynamic Mode (thypress serve) ===
@@ -1472,7 +1471,6 @@ ${bright('Configuration (config.json):')}
     "strictImages": false,              // Exit on broken images
     "strictThemeIsolation": false,      // Disable embedded defaults fallback
     "forceTheme": false,                // Load broken themes anyway
-    "discoverTemplates": false,         // Auto-detect template syntax
     "fingerprintAssets": true,          // Add hash to CSS/JS filenames
     "disablePreRender": false,          // Skip warmup on startup
     "preCompressContent": false,        // Pre-compress all pages (opt-in)

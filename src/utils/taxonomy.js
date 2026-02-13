@@ -107,7 +107,7 @@ export function getSiteConfig() {
     // === Theme System ===
     strictThemeIsolation: false,
     forceTheme: false,
-    discoverTemplates: false,
+    defaultTheme: null,             // Fallback embedded theme ID (null = use binary default)
     fingerprintAssets: false,
 
     // === Dynamic Mode (thypress serve) ===
