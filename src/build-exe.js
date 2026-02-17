@@ -1,6 +1,10 @@
-#!/usr/bin/env bun
+#!/usr/bin / env bun
+
+// SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS)
+// SPDX-License-Identifier: MPL-2.0
+
 import { spawnSync } from 'child_process';
-import pkg from '../package.json' assert { type: 'json' };
+import pkg from '../package.json' with { type: 'json' };
 
 const targets = process.argv[2]?.split(',') || [process.platform];
 

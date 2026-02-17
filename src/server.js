@@ -1,5 +1,6 @@
-// Copyright (C) 2026 THYPRESS
-//
+// SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS)
+// SPDX-License-Identifier: MPL-2.0
+
 // ARCHITECTURE NOTE:
 // THYPRESS operates in two distinct modes:
 //
@@ -13,17 +14,13 @@
 //    - No watchers. No Live Reload.
 //    - Serves pre-built files from /build directory only (Nginx behavior).
 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as
-// published by the Free Software Foundation, either version 3 of the
-// License, or (at your option) any later version.
-
 import fsSync from 'fs';
 import { watch } from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import zlib from 'zlib';
+import { SecurityManager } from './utils/security.js';
 
 // ============================================================================
 // CLEAN IMPORTS - Direct from source modules (no re-exports)
@@ -282,6 +279,9 @@ async function startDynamicServer() {
   // Cache state
   const cacheManager = new CacheManager(siteConfig.cacheMaxSize || 50 * 1024 * 1024);
 
+  // Security state
+  const securityManager = new SecurityManager(siteConfig);
+
   // ============================================================================
   // INTERNAL UTILITY FUNCTIONS
   // ============================================================================
@@ -383,7 +383,6 @@ async function startDynamicServer() {
         brokenImages = result.brokenImages;
         contentMode = result.mode;
 
-        // Clear caches
         cacheManager.renderedCache.clear();
         cacheManager.dynamicContentCache.clear();
 
@@ -429,7 +428,6 @@ async function startDynamicServer() {
    * Runs by default in dynamic mode unless disabled
    */
   async function preRenderAllContent() {
-    // Skip if disabled in config
     if (siteConfig.disablePreRender === true) {
       console.log(info('Pre-render disabled, pages will render on-demand'));
       return;
@@ -441,13 +439,10 @@ async function startDynamicServer() {
     let successCount = 0;
     let errorCount = 0;
 
-    // Import renderer functions
     const { renderEntry, renderEntryList, renderTagPage, renderCategoryPage, renderSeriesPage,
-            getAllTags, getAllCategories, getAllSeries, slugify, POSTS_PER_PAGE } =
-      await import('./renderer.js');
-    const { getAllTags: taxonomyGetAllTags, getAllCategories: taxonomyGetAllCategories, getAllSeries: taxonomyGetAllSeries } = await import('./utils/taxonomy.js');
+            POSTS_PER_PAGE } = await import('./renderer.js');
+    const { getAllTags: taxonomyGetAllTags, getAllCategories: taxonomyGetAllCategories, getAllSeries: taxonomyGetAllSeries, slugify: taxonomySlugify } = await import('./utils/taxonomy.js');
 
-    // Render all entry pages
     for (const [slug, entry] of contentCache) {
       try {
         let html;
@@ -468,7 +463,6 @@ async function startDynamicServer() {
       }
     }
 
-    // Render pagination pages
     const totalPages = Math.ceil(contentCache.size / POSTS_PER_PAGE);
     for (let page = 1; page <= totalPages; page++) {
       try {
@@ -482,7 +476,6 @@ async function startDynamicServer() {
       }
     }
 
-    // Render tag pages
     const allTags = taxonomyGetAllTags(contentCache);
     for (const tag of allTags) {
       try {
@@ -496,7 +489,6 @@ async function startDynamicServer() {
       }
     }
 
-    // Render category pages
     const allCategories = taxonomyGetAllCategories(contentCache);
     for (const category of allCategories) {
       try {
@@ -510,11 +502,9 @@ async function startDynamicServer() {
       }
     }
 
-    // Render series pages
     const allSeries = taxonomyGetAllSeries(contentCache);
     for (const series of allSeries) {
       try {
-        const { slugify: taxonomySlugify } = await import('./utils/taxonomy.js');
         const html = renderSeriesPage(contentCache, series, templatesCache, navigation, siteConfig, themeMetadata);
         cacheManager.renderedCache.set(`__series_${taxonomySlugify(series)}`, html);
         successCount++;
@@ -539,7 +529,6 @@ async function startDynamicServer() {
    * Opt-in feature for production dynamic mode
    */
   async function preCompressContent() {
-    // Skip if not enabled
     if (siteConfig.preCompressContent !== true) {
       return;
     }
@@ -554,11 +543,9 @@ async function startDynamicServer() {
       const etag = cacheManager.generateETag(buffer);
 
       try {
-        // Gzip
         const gzipped = await gzip(buffer);
         cacheManager.compressedBufferCache.set(`gzip:${etag}`, gzipped);
 
-        // Brotli
         const brotlied = await brotliCompress(buffer);
         cacheManager.compressedBufferCache.set(`br:${etag}`, brotlied);
 
@@ -650,34 +637,35 @@ async function startDynamicServer() {
     }
   }
 
-  function loadSingleContent(filename) {
-    const webPath = normalizeToWebPath(filename);
-    if (!/\.(md|txt|html)$/i.test(webPath)) return null;
+  // IT'S OVER, this surgical updates are tricky but KEEP THIS FUNCTION COMMENTED OUT FOR DOCS, DO NOT REMOVE IT
+  // function loadSingleContent(filename) {
+  //   const webPath = normalizeToWebPath(filename);
+  //   if (!/\.(md|txt|html)$/i.test(webPath)) return null;
 
-    try {
-      const fullPath = path.join(contentRoot, filename);
-      const result = processContentFile(fullPath, filename, contentMode, contentRoot, siteConfig);
+  //   try {
+  //     const fullPath = path.join(contentRoot, filename);
+  //     const result = processContentFile(fullPath, filename, contentMode, contentRoot, siteConfig);
 
-      if (!result) {
-        console.log(dim(`Skipped draft: ${path.basename(filename)}`));
-        return null;
-      }
+  //     if (!result) {
+  //       console.log(dim(`Skipped draft: ${path.basename(filename)}`));
+  //       return null;
+  //     }
 
-      contentCache.set(result.slug, result.entry);
-      slugMap.set(webPath, result.slug);
+  //     contentCache.set(result.slug, result.entry);
+  //     slugMap.set(webPath, result.slug);
 
-      if (result.imageReferences.length > 0) {
-        imageReferences.set(webPath, result.imageReferences);
-      }
+  //     if (result.imageReferences.length > 0) {
+  //       imageReferences.set(webPath, result.imageReferences);
+  //     }
 
-      console.log(success(`Entry '${path.basename(filename)}' loaded`));
-      invalidateDynamicCaches();
-      return result.slug;
-    } catch (error) {
-      console.error(errorMsg(`Error loading '${path.basename(filename)}': ${error.message}`));
-      return null;
-    }
-  }
+  //     console.log(success(`Entry '${path.basename(filename)}' loaded`));
+  //     invalidateDynamicCaches();
+  //     return result.slug;
+  //   } catch (error) {
+  //     console.error(errorMsg(`Error loading '${path.basename(filename)}': ${error.message}`));
+  //     return null;
+  //   }
+  // }
 
   // ============================================================================
   // INITIALIZATION SEQUENCE
@@ -685,7 +673,6 @@ async function startDynamicServer() {
 
   console.log(bright('Initializing Dynamic Engine...\n'));
 
-  // Load content
   const initialLoad = loadAllContent();
   contentCache = initialLoad.contentCache;
   slugMap = initialLoad.slugMap;
@@ -695,13 +682,10 @@ async function startDynamicServer() {
   contentMode = initialLoad.mode;
   contentRoot = initialLoad.contentRoot;
 
-  // Load config
   siteConfig = getSiteConfig();
 
-  // Load theme
   await reloadTheme();
 
-  // Validate required templates
   if (!templatesCache.has('index')) {
     console.log('');
     console.error(errorMsg('FATAL: Missing required template: index.html'));
@@ -730,23 +714,19 @@ async function startDynamicServer() {
 
   console.log(success('✓ Theme validation passed'));
 
-  // Load redirects
   loadRedirects();
 
-  // Optimize images
   if (!isOptimizingImages && imageReferences.size > 0) {
     isOptimizingImages = true;
     await optimizeToCache(imageReferences, brokenImages);
     isOptimizingImages = false;
   }
 
-  // Generate search index on startup
   console.log(info('Generating search index...'));
   const searchIndex = generateSearchIndex(contentCache);
   cacheManager.dynamicContentCache.set('search.json', { content: searchIndex });
   console.log(success('Search index ready'));
 
-  // Pre-render and pre-compress
   await preRenderAllContent();
   await preCompressContent();
 
@@ -767,8 +747,6 @@ async function startDynamicServer() {
       try {
         if (/\.(md|txt|html)$/i.test(webPath)) {
           console.log(info(`Content: ${event} - ${path.basename(filename)}`));
-
-          // For any content change, schedule full reload
           scheduleFullReload();
         }
 
@@ -867,6 +845,21 @@ async function startDynamicServer() {
       try {
         metrics.requests++;
 
+        // Security validation layer
+        const ip = securityManager.getClientIP(request);
+
+        // Check IP ban
+        if (securityManager.isIPBanned(ip)) {
+          return new Response(null, { status: 403 });
+        }
+
+        // Validate request headers
+        const validation = securityManager.validateRequest(request);
+        if (!validation.valid) {
+          console.log(`[SECURITY] Rejected request: ${validation.error}`);
+          return new Response('Forbidden', { status: 403 });
+        }
+
         const deps = {
           contentCache,
           slugMap,
@@ -886,7 +879,8 @@ async function startDynamicServer() {
           cacheManager,
           metrics,
           preRenderAllContent,
-          preCompressContent
+          preCompressContent,
+          securityManager // Pass security manager to routes
         };
 
         return await handleRequest(request, server, deps);
@@ -902,16 +896,20 @@ async function startDynamicServer() {
 
   const serverUrl = `http://localhost:${port}`;
 
+  // Generate magic link for CLI output
+  const magicToken = securityManager.generateMagicToken();
+  const adminUrl = `${serverUrl}/__thypress_${securityManager.adminSecret}/?token=${magicToken}`;
+
   console.log(bright(`\n• Server running on ${serverUrl}`));
   console.log(dim(`• Mode: Dynamic`));
   console.log(dim(`• Content root: ${contentRoot}`));
   console.log(dim(`• Live reload: enabled`));
-  console.log(dim(`• Admin panel: ${serverUrl}/__thypress/`));
+  console.log(bright(`• Admin panel: ${adminUrl}`));
 
   const shouldOpenBrowser = process.env.THYPRESS_OPEN_BROWSER === 'true';
   if (shouldOpenBrowser) {
     console.log(info('Opening browser...\n'));
-    openBrowser(serverUrl);
+    openBrowser(serverUrl); // Opens site homepage — admin link is printed to console above
   }
 
   setupGracefulShutdown({ liveReloadClients });

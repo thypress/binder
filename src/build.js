@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS)
+// SPDX-License-Identifier: MPL-2.0
+
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -568,6 +571,11 @@ function buildRobotsTxt(siteConfig, themeAssets) {
       }
     } else {
       content = `User-agent: *\nAllow: /\n\nSitemap: ${siteConfig.url || 'https://example.com'}/sitemap.xml\n`;
+    }
+
+    // Add spider trap disallow (security feature)
+    if (!content.includes('/__trap/')) {
+      content += '\n# Security: Spider trap\nDisallow: /__trap/\n';
     }
 
     fs.writeFileSync(path.join(BUILD_DIR, 'robots.txt'), content);

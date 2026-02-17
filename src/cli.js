@@ -1,17 +1,5 @@
-// Copyright (C) 2026 THYPRESS
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as
-// published by the Free Software Foundation, either version 3 of the
-// License, or (at your option) any later version.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org>.
+// SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS)
+// SPDX-License-Identifier: MPL-2.0
 
 import os from 'os';
 import fs from 'fs';
@@ -28,6 +16,19 @@ import { REDIRECT_STATUS_CODES, DEFAULT_STATUS_CODE, parseRedirectRules } from '
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 const VERSION = globalThis.__THYPRESS_VERSION__ ?? JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')).version;
+
+// ============================================================================
+// BUNDLERBUS COMPATIBILITY: Restore working directory
+// ============================================================================
+// Bundlerbus (Bun 1.3.9+) must run from cache for module resolution.
+// The original working directory is stored in this env var.
+if (process.env.BUNDLERBUS_ORIGINAL_CWD) {
+  const originalCwd = process.env.BUNDLERBUS_ORIGINAL_CWD;
+  console.log(`[BUNDLERBUS] Detected bundled execution`);
+  console.log(`[BUNDLERBUS] Restoring cwd from ${process.cwd()} to ${originalCwd}`);
+  process.chdir(originalCwd);
+  // Don't delete env var - other modules might need it
+}
 
 // ============================================================================
 // INTENT MODES - The three ways users interact with THYPRESS
@@ -81,7 +82,6 @@ function parseArgs() {
 
     if (arg === 'redirects') {
       command = 'redirects';
-      // Next arg is the action
       if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
         redirectAction = args[i + 1];
         i++;
@@ -91,7 +91,6 @@ function parseArgs() {
 
     if (arg === 'validate' || arg === 'v') {
       command = 'validate';
-      // Next arg is the target
       if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
         validateTarget = args[i + 1];
         i++;
@@ -143,6 +142,19 @@ function parseArgs() {
       continue;
     }
 
+    // PIN setup — sets/updates the 4-digit admin PIN and exits immediately.
+    // Handled here rather than as a separate command so it works standalone:
+    // "thypress --pin 1234" with no other arguments.
+    if (arg === '--pin') {
+      if (i + 1 >= args.length || args[i + 1].startsWith('-')) {
+        console.error(errorMsg('--pin requires a 4-digit number'));
+        console.log(dim('Example: thypress --pin 1234'));
+        process.exit(1);
+      }
+      handlePINSetup(args[i + 1]);
+      // handlePINSetup calls process.exit — execution never reaches here
+    }
+
     if (fs.existsSync(arg) && fs.statSync(arg).isDirectory()) {
       targetDir = arg;
       continue;
@@ -153,7 +165,6 @@ function parseArgs() {
       continue;
     }
 
-    // Check for .zip files (theme installation)
     if (arg.endsWith('.zip')) {
       command = 'install-theme';
       themeArchivePath = path.resolve(arg);
@@ -171,6 +182,32 @@ function parseArgs() {
 }
 
 const { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs, redirectAction, themeArchivePath, validateTarget } = parseArgs();
+
+/**
+ * Handle --pin flag to set/update PIN
+ */
+function handlePINSetup(pin) {
+  if (!/^\d{4}$/.test(pin)) {
+    console.error(errorMsg('PIN must be exactly 4 digits'));
+    console.log(dim('Example: thypress --pin 1234'));
+    process.exit(1);
+  }
+
+  const configDir = path.join(process.cwd(), '.thypress');
+  const pinPath = path.join(configDir, 'pin');
+
+  if (!fs.existsSync(configDir)) {
+    fs.mkdirSync(configDir, { recursive: true });
+  }
+
+  fs.writeFileSync(pinPath, pin, 'utf-8');
+
+  console.log(success(`✓ PIN set successfully`));
+  console.log(dim('Your admin panel is now protected with PIN authentication'));
+  console.log('');
+
+  process.exit(0);
+}
 
 // ============================================================================
 // INTENT DISPATCHER - Determines user intent BEFORE any filesystem operations
@@ -202,10 +239,34 @@ function determineIntent() {
   if (zipFile) {
     console.log(info(`Detected: Theme archive (${path.basename(zipFile)})`));
 
+    // Determine where to install theme:
+    // 1. If cwd has config.json → user is working in their project
+    // 2. Else if exe folder has config.json → exe is in a project
+    // 3. Else → use exe folder (will create new project structure)
+
+    const cwd = process.cwd();
+    // CRITICAL: Use process.execPath (real exe location), NOT process.argv[0] (virtual path)
+    const exeFolder = path.dirname(process.execPath);
+    let workingDir;
+
+    console.log(info(`[DEBUG] cwd: ${cwd}`));
+    console.log(info(`[DEBUG] exeFolder: ${exeFolder}`));
+
+    if (fs.existsSync(path.join(cwd, 'config.json'))) {
+      console.log(info(`[DEBUG] Found config.json in cwd, using: ${cwd}`));
+      workingDir = cwd;
+    } else if (fs.existsSync(path.join(exeFolder, 'config.json'))) {
+      console.log(info(`[DEBUG] Found config.json in exeFolder, using: ${exeFolder}`));
+      workingDir = exeFolder;
+    } else {
+      console.log(info(`[DEBUG] No config.json found, defaulting to exeFolder: ${exeFolder}`));
+      workingDir = exeFolder;
+    }
+
     return {
       mode: THYPRESS_MODES.INSTALLER,
       zipPath: path.resolve(zipFile),
-      workingDir: process.cwd()  // Install to current working directory
+      workingDir: workingDir
     };
   }
 
@@ -653,7 +714,7 @@ Edit \`config.json\`:
   "description": "A site powered by THYPRESS",
   "url": "https://example.com",
   "author": "Your Name",
-  "theme": "my-press",
+  "theme": ".default",
   "contentDir": "content",
   "readingSpeed": 200,
   "escapeTextFiles": true,
@@ -697,6 +758,7 @@ Happy writing! 🎉
         theme: 'my-press',
         strictThemeIsolation: false,
         forceTheme: false,
+        discoverTemplates: false,
         fingerprintAssets: false,
 
         // === Dynamic Mode (thypress serve) ===
@@ -821,65 +883,119 @@ async function installThemeFromArchive(zipPath, targetDir) {
     // Clean up temp directory
     fs.rmSync(tempDir, { recursive: true, force: true });
 
-    console.log(success(`\nTheme installed: ${themeName}`));
-    console.log(dim(`Location: ${path.relative(targetDir, themeDestination)}/`));
-
-    // Count theme files
+    // Count theme files for display
     const themeFiles = fs.readdirSync(themeDestination, { recursive: true })
       .filter(f => {
         const fullPath = path.join(themeDestination, f);
         return fs.statSync(fullPath).isFile();
       });
 
-    console.log(dim(`Files: ${themeFiles.length}`));
+    // ========================================================================
+    // INTERACTIVE PROMPT: Activate theme or finish without activating
+    // ========================================================================
 
-    // Update config.json to use new theme
-    const configPath = path.join(targetDir, 'config.json');
-    let config = {};
+    console.log('');
+    console.log(success('✓ Theme installed successfully!'));
+    console.log('');
+    console.log(bright(`  Theme:    ${themeName}`));
+    console.log(dim(`  Location: templates/${themeName}/`));
+    console.log(dim(`  Files:    ${themeFiles.length}`));
+    console.log('');
+    console.log(dim('  • Manage all themes: localhost:3009/__thypress'));
+    console.log('');
+    console.log(dim('  ─────────────────────────────────────────'));
+    console.log('');
+    console.log(bright('  [Enter]    ') + 'Activate this theme now');
+    console.log(bright('  [Any key]  ') + 'Finish without activating');
+    console.log('');
 
-    if (fs.existsSync(configPath)) {
-      try {
-        config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-        const oldTheme = config.theme;
-        config.theme = themeName;
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-        console.log(success(`Updated config.json: theme '${oldTheme}' → '${themeName}'`));
-      } catch (error) {
-        console.log(warning(`Could not update config.json: ${error.message}`));
-      }
-    } else {
-      // Create config.json if it doesn't exist
-      config = {
-        title: 'My Site',
-        description: 'A site powered by THYPRESS',
-        url: 'https://example.com',
-        author: 'Anonymous',
-        theme: themeName,
-        readingSpeed: 200,
-        escapeTextFiles: true,
-        strictImages: false,
-        fingerprintAssets: false
+    // Wait for user input
+    const readline = require('readline');
+    readline.emitKeypressEvents(process.stdin);
+
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+
+    await new Promise((resolve) => {
+      const onKeypress = (str, key) => {
+        // Clean up listener
+        process.stdin.removeListener('keypress', onKeypress);
+
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+
+        // Handle Ctrl+C
+        if (key && key.ctrl && key.name === 'c') {
+          console.log('');
+          console.log(info('Installation cancelled.'));
+          process.exit(0);
+        }
+
+        console.log(''); // Add newline after keypress
+
+        // Check if Enter was pressed
+        if (key && key.name === 'return') {
+          // User wants to activate theme
+          console.log(info(`Activating theme: ${themeName}...`));
+          console.log('');
+
+          const configPath = path.join(targetDir, 'config.json');
+          let config = {};
+
+          if (fs.existsSync(configPath)) {
+            try {
+              config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+              const oldTheme = config.theme || 'default';
+              config.theme = themeName;
+              fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+              console.log(success(`✓ Theme activated: ${oldTheme} → ${themeName}`));
+            } catch (error) {
+              console.log(warning(`Could not update config.json: ${error.message}`));
+            }
+          } else {
+            // Create config.json if it doesn't exist
+            config = {
+              title: 'My Site',
+              description: 'A site powered by THYPRESS',
+              url: 'https://example.com',
+              author: 'Anonymous',
+              theme: themeName,
+              readingSpeed: 200,
+              escapeTextFiles: true,
+              strictImages: false,
+              fingerprintAssets: false
+            };
+            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+            console.log(success(`✓ Theme activated: ${themeName}`));
+            console.log(dim('  Created config.json'));
+          }
+
+          console.log('');
+          console.log(bright('Next steps:'));
+          console.log(dim('• If THYPRESS is running, it will reload automatically'));
+          console.log(dim('• If not, launch THYPRESS to see your new theme'));
+          console.log('');
+
+        } else {
+          // User pressed other key - finish without activating
+          console.log(info('Theme installed but not activated.'));
+          console.log('');
+          console.log(bright('Next steps:'));
+          console.log(dim(`• Activate later: Set "theme": "${themeName}" in config.json`));
+          console.log(dim('• Or use admin panel: localhost:3009/__thypress'));
+          console.log('');
+        }
+
+        resolve();
       };
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-      console.log(success('Created config.json with new theme'));
-    }
 
-    // Check if there's content to serve
-    const contentDirPath = path.join(targetDir, 'content');
-    const hasContent = fs.existsSync(contentDirPath);
+      process.stdin.on('keypress', onKeypress);
+    });
 
-    console.log('');
-    console.log(bright('Next steps:'));
-
-    if (!hasContent) {
-      console.log(dim('• Run THYPRESS again to initialize content/ folder'));
-      console.log(dim('• Or drop your existing content folder'));
-    } else {
-      console.log(dim('• Run THYPRESS again to preview with new theme'));
-      console.log(dim('• Edit templates/ to customize your theme'));
-    }
-
-    console.log('');
+    // Exit cleanly - do NOT launch server
+    process.exit(0);
 
   } catch (error) {
     console.error(errorMsg(`\nTheme installation failed: ${error.message}`));
@@ -898,6 +1014,7 @@ async function installThemeFromArchive(zipPath, targetDir) {
     process.exit(1);
   }
 }
+
 
 // ============================================================================
 // SERVE COMMAND
@@ -949,6 +1066,8 @@ async function serve() {
 
   console.log('');
 
+  // Note: The server.js will output the magic link URL
+  // We just need to import and let it run
   const serverPath = new URL('./server.js', import.meta.url).href;
 
   import(serverPath).catch(error => {
@@ -1465,12 +1584,13 @@ ${bright('Configuration (config.json):')}
   {
     "contentDir": "articles",           // Custom content directory
     "skipDirs": ["tmp", "backup"],      // Additional dirs to skip
-    "theme": "my-press",                // Active theme
+    "theme": ".default",                // Active theme
     "readingSpeed": 200,                // Words per minute
     "escapeTextFiles": true,            // Escape HTML in .txt files
     "strictImages": false,              // Exit on broken images
     "strictThemeIsolation": false,      // Disable embedded defaults fallback
     "forceTheme": false,                // Load broken themes anyway
+    "discoverTemplates": false,         // Auto-detect template syntax
     "fingerprintAssets": true,          // Add hash to CSS/JS filenames
     "disablePreRender": false,          // Skip warmup on startup
     "preCompressContent": false,        // Pre-compress all pages (opt-in)

@@ -1,28 +1,14 @@
 {
   "name": "thypress",
   "version": "0.3.0",
-  "description": "Dead simple markdown blog/docs engine",
-  "type": "module",
-  "bin": {
-    "thypress": "./src/cli.js"
-  },
-  "files": [
-    "src/",
-    "templates/"
-  ],
-  "scripts": {
-    "test": "bun test",
-    "test:watch": "bun test --watch",
-    "test:coverage": "bun test --coverage",
-    "predev": "bun src/embed-templates.js",
-    "dev": "bun src/cli.js serve",
-    "build:static": "bun src/cli.js build",
-    "prebuild:exe": "bun src/embed-templates.js",
-    "build:exe": "bun src/build-exe.js",
-    "build:exe:all": "bun src/build-exe.js win32,darwin,linux"
+  "author": "Your Name",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thypress/thypress.git"
   },
   "dependencies": {
     "@zip.js/zip.js": "^2.3.18",
+    "bundlerbus": "^1.1.0",
     "feed": "^4.2.2",
     "gray-matter": "^4.0.3",
     "handlebars": "^4.7.8",
@@ -36,6 +22,17 @@
     "sharp": "^0.33.0",
     "sitemap": "^7.1.1"
   },
+  "bin": {
+    "thypress": "./src/cli.js"
+  },
+  "description": "Dead simple markdown blog/docs engine",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src/",
+    "templates/"
+  ],
   "keywords": [
     "blog",
     "markdown",
@@ -44,16 +41,17 @@
     "generator",
     "ssg"
   ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/thypress/thypress.git"
-  },
-  "author": "Your Name",
   "license": "MPL-2.0",
-  "engines": {
-    "node": ">=18.0.0"
+  "scripts": {
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "test:coverage": "bun test --coverage",
+    "predev": "bun src/embed-templates.js",
+    "dev": "bun src/cli.js serve",
+    "build:static": "bun src/cli.js build",
+    "prebuild:exe": "bun src/embed-templates.js",
+    "build:exe": "bun src/build-exe.js",
+    "build:exe:all": "bun src/build-exe.js win32,darwin,linux"
   },
-  "devDependencies": {
-    "bundlerbus": "^1.0.0"
-  }
+  "type": "module"
 }

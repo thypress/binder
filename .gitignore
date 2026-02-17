@@ -138,19 +138,26 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-
 # THYPRESS SECTION
 bun.lockb
 bun.lock
 .DS_Store
-src/embedded-templates.js
 thypress
 thypress-*
 config.json
 
+src/embedded-templates.js
+src/**/_*.js
+
 # THYPRESS cache and build
 .cache/
 build/
+
+# THYPRESS security files (contains secrets)
+.thypress/
+#.thypress/admin_secret
+#.thypress/hmac_secret
+#.thypress/pin
 
 # Sharp bindings (distributed separately)
 sharp.node
