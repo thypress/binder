@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import fs from 'fs/promises';
-import fsSync from 'fs';
 import path from 'path';
+import fsSync from 'fs';
 
 // ============================================================================
 // CLEAN IMPORTS - Direct from source modules (no re-exports)

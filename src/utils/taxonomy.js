@@ -113,6 +113,14 @@ const DEFAULTS = {
   fingerprintAssets: false,
   strictThemeIsolation: false,
 
+  // === Template Routing ===
+  // When true, content inside a subfolder (e.g. content/podcast/) will
+  // automatically use a matching theme template (e.g. podcast.html) if one
+  // exists, walking from the deepest folder toward the root until a match
+  // is found. Disabled by default to prevent unexpected layout changes when
+  // users drag-and-drop unrelated folders.
+  matchTemplateToClosestDir: false,
+
   // === Dynamic Mode (thypress serve) ===
   disablePreRender: false,        // Skip warmup for faster dev startups
   disableLiveReload: false,       // Disable live reload

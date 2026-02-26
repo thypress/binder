@@ -1,9 +1,211 @@
 // SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS <https://thypress.org>)
 // SPDX-License-Identifier: MPL-2.0
 
-import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import { isIP } from 'node:net';
+
+// ============================================================================
+// IP NORMALIZATION & LOOPBACK DETECTION
+//
+// This module provides the AUTHORIZATION path for local-only feature gates.
+// It is deliberately decoupled from SecurityManager.getClientIP(), which
+// serves the IDENTIFICATION path (banning, rate-limiting, logging).
+//
+// The two paths have opposite failure semantics:
+//   - Identification (getClientIP):  fails OPEN  → 'unknown' (safe: worst case = can't ban)
+//   - Authorization  (isLocalRequest): fails CLOSED → false    (safe: worst case = denied)
+//
+// DO NOT merge these paths. DO NOT call getClientIP from isLocalRequest.
+// ============================================================================
+
+/**
+ * Expand an IPv6 address string into an array of 8 numeric groups (0–0xFFFF).
+ * Handles :: shorthand, fully-expanded, and mixed forms.
+ *
+ * @param {string} ip - A valid IPv6 address string
+ * @returns {number[]|null} Array of 8 group values, or null if unparseable
+ *
+ * INTERNAL — only safe for inputs that have already passed through normalizeIP().
+ * Does NOT handle mixed notation (::ffff:127.0.0.1) — normalizeIP strips those
+ * to plain IPv4 before this function is ever reached. Do not use standalone.
+*/
+function expandIPv6(ip) {
+  const halves = ip.split('::');
+
+  // A valid IPv6 has at most one :: (two halves)
+  if (halves.length > 2) return null;
+
+  let groups;
+
+  if (halves.length === 2) {
+    // Has :: — expand the gap
+    const left  = halves[0] ? halves[0].split(':') : [];
+    const right = halves[1] ? halves[1].split(':') : [];
+    const missing = 8 - left.length - right.length;
+
+    if (missing < 0) return null;
+
+    groups = [...left, ...Array(missing).fill('0'), ...right];
+  } else {
+    // No :: — must have exactly 8 groups
+    groups = ip.split(':');
+  }
+
+  if (groups.length !== 8) return null;
+
+  const parsed = groups.map(g => parseInt(g, 16));
+
+  if (parsed.some(v => isNaN(v) || v < 0 || v > 0xFFFF)) return null;
+
+  return parsed;
+}
+
+/**
+ * Normalize an IP address for consistent comparison.
+ *
+ * - Strips IPv4-mapped IPv6 prefix when the mapped part is dotted-decimal
+ *   (e.g. ::ffff:127.0.0.1 → 127.0.0.1)
+ * - Validates the result with node:net isIP()
+ * - Returns empty string on invalid, missing, or non-string input
+ *
+ * NOTE: IPv4-mapped addresses in pure-hex form (::ffff:7f00:1) are left as
+ * valid IPv6 and handled downstream by isLoopback's hex-mapped detection.
+ *
+ * @param {string} raw - Raw IP address from any source
+ * @returns {string} Normalized IP, or '' if invalid
+ */
+export function normalizeIP(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  const ip = raw.trim();
+
+  // Strip IPv4-mapped IPv6 prefix when payload is dotted-decimal IPv4
+  // Covers: ::ffff:127.0.0.1, ::FFFF:192.168.1.1, etc.
+  if (ip.toLowerCase().startsWith('::ffff:')) {
+    const v4Part = ip.substring(7);
+    if (isIP(v4Part) === 4) return v4Part;
+    // Hex-form mapped addresses (::ffff:7f00:1) fall through as valid IPv6
+  }
+
+  if (isIP(ip) === 0) return '';
+
+  return ip;
+}
+
+/**
+ * Determine whether an IP address is in the loopback range.
+ *
+ * Covers:
+ *   IPv4:  entire 127.0.0.0/8 block (RFC 1122 §3.2.1.3)
+ *   IPv6:  ::1 in any notation (compact, expanded, mixed-case)
+ *   IPv6:  IPv4-mapped loopback in hex form (::ffff:7f00:1, etc.)
+ *   IPv6:  IPv4-mapped loopback in dotted form (::ffff:127.0.0.1)
+ *          — normalizeIP converts this to 127.0.0.1 before we see it
+ *
+ * @param {string} ip - Raw or normalized IP address
+ * @returns {boolean} true if loopback, false otherwise (including invalid input)
+ */
+export function isLoopback(ip) {
+  const normalized = normalizeIP(ip);
+  if (!normalized) return false;
+
+  // ── IPv4 ────────────────────────────────────────────────────────────────
+  if (isIP(normalized) === 4) {
+    return normalized.startsWith('127.');
+  }
+
+  // ── IPv6 ────────────────────────────────────────────────────────────────
+  if (isIP(normalized) === 6) {
+    const groups = expandIPv6(normalized);
+    if (!groups) return false;
+
+    // Pure loopback — ::1
+    // All groups 0 except the last, which must be exactly 1.
+    // Matches: ::1, 0:0:0:0:0:0:0:1, 0000:0000:0000:0000:0000:0000:0000:0001
+    const isPureLoopback =
+      groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 &&
+      groups[4] === 0 && groups[5] === 0 && groups[6] === 0 && groups[7] === 1;
+
+    if (isPureLoopback) return true;
+
+    // IPv4-mapped loopback in hex notation — ::ffff:7fXX:XXXX
+    // Structure: groups 0-4 = 0, group 5 = 0xFFFF, groups 6-7 encode IPv4.
+    // We extract the first octet from group 6's high byte and check for 127.
+    const isV4Mapped =
+      groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 &&
+      groups[4] === 0 && groups[5] === 0xFFFF;
+
+    if (isV4Mapped) {
+      const firstOctet = (groups[6] >>> 8) & 0xFF;
+      return firstOctet === 127;
+    }
+
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Authorization gate: Is this request from the local machine?
+ *
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │ SECURITY CONTRACT                                                  │
+ * │                                                                    │
+ * │ 1. Fails CLOSED — unknown/missing IP → false (deny)               │
+ * │ 2. Reads ONLY the TCP-layer peer address (server.requestIP)       │
+ * │ 3. NEVER inspects headers (XFF, X-Real-IP, Forwarded, Host, etc.) │
+ * │ 4. NEVER calls SecurityManager.getClientIP                        │
+ * │ 5. NEVER returns true for non-loopback addresses                  │
+ * │ 6. Pure function of (request, server) — no mutable state          │
+ * └─────────────────────────────────────────────────────────────────────┘
+ *
+ * This function gates destructive local-only operations:
+ *   - create-project   (writes to filesystem)
+ *   - open-folder      (exec() — shell command)
+ *   - upload-theme     (writes to filesystem)
+ *   - admin panel      (isLocal flag for conditional UI)
+ *
+ * If THYPRESS is behind a reverse proxy, the TCP peer address is the
+ * proxy's IP (not loopback), so local-only features are correctly
+ * disabled. Users who need admin access remotely must use the
+ * authenticated session (PIN + PoW or magic link).
+ *
+ * @param {Request} request - Bun Web Standard Request object
+ * @param {Object|null} server - Bun server instance (second arg from fetch handler)
+ * @returns {boolean} true ONLY if TCP peer address is verified loopback
+ */
+export function isLocalRequest(request, server) {
+  // ── Guard: server instance must exist and expose requestIP ──────────
+  if (!server || typeof server.requestIP !== 'function') {
+    return false;
+  }
+
+  // ── Resolve TCP-layer peer address ──────────────────────────────────
+  let addr;
+  try {
+    addr = server.requestIP(request);
+  } catch {
+    // Bun internal failure (malformed request, connection reset, etc.)
+    return false;
+  }
+
+  if (!addr || !addr.address) {
+    return false;
+  }
+
+  // ── Loopback check on the raw TCP address ───────────────────────────
+  const result = isLoopback(addr.address);
+
+  if (!result) {
+    console.debug(`[SECURITY] isLocalRequest denied: TCP peer ${addr.address} is not loopback`);
+  }
+
+  return result;
+}
+
 
 /**
  * SecurityManager - Centralized security implementation for THYPRESS
@@ -32,8 +234,10 @@ export class SecurityManager {
     this.rateLimits = new Map(); // IP -> { attempts: number, lastAttempt: timestamp, backoffUntil: timestamp }
 
     // Session management (in-memory, persists until server restart)
-    // Reasoning: THYPRESS is a dev tool where restarts are common, single admin user.
-    // Server-side 24h TTL enforced in verifySession to match cookie Max-Age.
+    // Reasoning: THYPRESS is a dual-use tool (dev and production, local and remote)
+    // with a single-admin or small-team model. Server restarts are expected in dev;
+    // in production, sessions are ephemeral by design — 24h server-side TTL enforced
+    // in verifySession to match cookie Max-Age.
     this.sessions = new Map(); // sessionId -> { ip: string, createdAt: timestamp }
 
     // One-time magic link tokens with creation timestamps for TTL enforcement.
@@ -191,41 +395,67 @@ export class SecurityManager {
   // ============================================================================
 
   /**
-   * Extract client IP from request using Bun's native server.requestIP().
+   * Extract client IP from request for IDENTIFICATION purposes.
+   *
+   * Used by: rate limiting, IP banning, session binding, honeypot logging.
+   *
+   * ┌─────────────────────────────────────────────────────────────────────┐
+   * │ WARNING: This method returns 'unknown' when IP resolution fails.   │
+   * │ This is SAFE for identification (banning, rate-limiting, logging)  │
+   * │ but UNSAFE for authorization (granting privileges).                │
+   * │                                                                    │
+   * │ For authorization decisions (local-only feature gates), use        │
+   * │ isLocalRequest() instead. That function fails    │
+   * │ CLOSED (returns false on any failure).                             │
+   * └─────────────────────────────────────────────────────────────────────┘
    *
    * Priority:
-   *   1. X-Forwarded-For header (only when trustProxy: true in siteConfig)
-   *   2. Bun's server.requestIP(request) — the real TCP-layer remote address
-   *   3. 'unknown' fallback (should never be reached in practice with Bun.serve)
+   *   1. X-Forwarded-For header (only when trustProxy: true, validated)
+   *   2. Bun's server.requestIP(request) — TCP-layer remote address
+   *   3. 'unknown' fallback
    *
-   * CRITICAL: The `server` object must be the Bun server instance passed as the
-   * second argument to the Bun.serve fetch handler. It is threaded through deps
-   * as deps.bunServer. Without it, banning and per-IP rate limiting are non-functional
-   * because all clients appear as 'unknown' and share the same rate limit bucket.
+   * All returned IPs are normalized (::ffff:x.x.x.x → x.x.x.x) so that
+   * downstream consumers (session IP-binding, ban sets, rate-limit keys)
+   * compare consistently regardless of dual-stack socket behavior.
    *
    * @param {Request} request - Incoming HTTP request
    * @param {Object|null} server - Bun server instance (from fetch handler 2nd arg)
-   * @returns {string} Client IP address
+   * @returns {string} Client IP address or 'unknown'
    */
   getClientIP(request, server) {
     // 1. If trust proxy is enabled, check forwarded headers first
     if (this.trustProxy) {
       const forwarded = request.headers.get('x-forwarded-for');
       if (forwarded) {
-        // Take first IP in chain (closest client)
-        return forwarded.split(',')[0].trim();
+        const firstEntry = forwarded.split(',')[0].trim();
+        // Validate: only accept if it's a syntactically valid IP.
+        // Prevents garbage strings from polluting ban sets, rate-limit
+        // keys, and session records.
+        const normalized = normalizeIP(firstEntry);
+        if (normalized) return normalized;
+        // Invalid/empty XFF entry — fall through to TCP address
       }
     }
 
     // 2. Use Bun's native IP resolution — the actual TCP remote address
     if (server && typeof server.requestIP === 'function') {
-      const addr = server.requestIP(request);
-      if (addr) {
-        return addr.address;
+      try {
+        const addr = server.requestIP(request);
+        if (addr && addr.address) {
+          // Normalize so that session IP-binding, ban checks, and
+          // rate-limit keys are consistent across dual-stack sockets.
+          // e.g. ::ffff:127.0.0.1 and 127.0.0.1 become the same key.
+          return normalizeIP(addr.address) || 'unknown';
+        }
+      } catch {
+        // server.requestIP can fail on malformed requests or after
+        // connection reset. Fall through to 'unknown'.
       }
     }
 
-    // 3. Last resort fallback — IP banning and per-IP rate limiting won't work correctly
+    // 3. Last resort fallback.
+    // SAFE for identification (banning, rate-limiting, logging).
+    // NEVER use this value for authorization — use isLocalRequest() instead.
     return 'unknown';
   }
 

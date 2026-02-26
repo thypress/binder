@@ -1,9 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS <https://thypress.org>)
 // SPDX-License-Identifier: MPL-2.0
 
+import os from 'os';
 import fs from 'fs/promises';
-import fsSync from 'fs';
 import path from 'path';
+import fsSync from 'fs';
+import { execFile } from 'child_process';
+
+import { ZipReader, BlobReader, BlobWriter } from '@zip.js/zip.js';
+
+import { isLocalRequest } from './utils/security.js';
 
 // ============================================================================
 // LOCAL CONSTANTS
@@ -108,11 +114,8 @@ export async function handleAdmin(request, deps, adminBase) {
   const route = url.pathname;
   const securityManager = deps.securityManager;
 
-  // Use Bun's native IP resolution via deps.bunServer (see security.js getClientIP)
   const ip = securityManager.getClientIP(request, deps.bunServer);
 
-  // Derive all admin sub-routes from adminBase at call time.
-  // No separate constant or helper needed — everything flows from one string.
   const loginRoute      = `${adminBase}/login`;
   const authRoute       = `${adminBase}/auth`;
   const challengeRoute  = `${adminBase}/auth/challenge`;
@@ -122,7 +125,7 @@ export async function handleAdmin(request, deps, adminBase) {
   const clearCacheRoute = `${adminBase}/clear-cache`;
   const previewPrefix   = `${adminBase}/theme-preview/`;
 
-  // Public: login page (no session required)
+  // Public: login page
   if (route === loginRoute && request.method === 'GET') {
     const { generateLoginHTML } = await import('./admin-pages.js');
     const html = generateLoginHTML({ hasPin: securityManager.pin !== null, adminBase });
@@ -131,7 +134,7 @@ export async function handleAdmin(request, deps, adminBase) {
     });
   }
 
-  // Public: PoW challenge (no session required)
+  // Public: PoW challenge
   if (route === challengeRoute && request.method === 'GET') {
     const salt = securityManager.generatePowChallenge(ip);
     return new Response(JSON.stringify({ salt }), {
@@ -139,13 +142,12 @@ export async function handleAdmin(request, deps, adminBase) {
     });
   }
 
-  // Public: authentication endpoint (magic link or PIN + PoW)
+  // Public: authentication endpoint
   if (route === authRoute && request.method === 'POST') {
     try {
       const body = await request.json();
       const { token, pin, nonce } = body;
 
-      // Magic link flow
       if (token) {
         if (securityManager.verifyMagicToken(token)) {
           const sessionId = securityManager.createSession(ip);
@@ -162,7 +164,6 @@ export async function handleAdmin(request, deps, adminBase) {
         });
       }
 
-      // PIN + PoW flow
       if (pin && nonce) {
         const rateLimit = securityManager.checkRateLimit(ip);
         if (!rateLimit.allowed) {
@@ -205,7 +206,6 @@ export async function handleAdmin(request, deps, adminBase) {
         status: 400,
         headers: { 'Content-Type': MIME_TYPES.JSON }
       });
-
     } catch (error) {
       return new Response(JSON.stringify({ success: false, error: 'Invalid request' }), {
         status: 400,
@@ -214,9 +214,8 @@ export async function handleAdmin(request, deps, adminBase) {
     }
   }
 
-  // Public: first-time PIN setup (only accepted when no PIN is configured yet)
+  // Public: first-time PIN setup
   if (route === `${adminBase}/setup-pin` && request.method === 'POST') {
-    // Reject if a PIN already exists — prevents overwriting without auth
     if (securityManager.pin !== null) {
       return new Response(JSON.stringify({ success: false, error: 'PIN already set' }), {
         status: 403,
@@ -237,7 +236,6 @@ export async function handleAdmin(request, deps, adminBase) {
 
       securityManager.setPIN(pin);
 
-      // Return redirect so the client can send the user to the admin panel
       return new Response(JSON.stringify({ success: true, redirect: `${adminBase}/` }), {
         headers: { 'Content-Type': MIME_TYPES.JSON }
       });
@@ -249,7 +247,7 @@ export async function handleAdmin(request, deps, adminBase) {
     }
   }
 
-  // All routes below this point require an authenticated session
+  // All routes below require an authenticated session
   if (!securityManager.verifySession(request, deps.bunServer)) {
     const token = url.searchParams.get('token');
     const destination = token ? `${loginRoute}?token=${encodeURIComponent(token)}` : loginRoute;
@@ -288,7 +286,7 @@ export async function handleAdmin(request, deps, adminBase) {
     });
   }
 
-  // POST: config updates (theme activation, fallback theme)
+  // POST: config updates
   if (route === configRoute) {
     if (request.method !== 'POST') {
       return new Response(JSON.stringify({ success: false, error: 'Method not allowed' }), {
@@ -421,10 +419,258 @@ export async function handleAdmin(request, deps, adminBase) {
     });
   }
 
+  // POST: create new project (Welcome mode — local only)
+  if (route === `${adminBase}/create-project` && request.method === 'POST') {
+    if (!isLocalRequest(request, deps.bunServer)) {
+      return new Response(JSON.stringify({ success: false, error: 'Local access only' }), {
+        status: 403,
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+    }
+
+    try {
+      const body = await request.json();
+      const rawName = (body.name || '').trim();
+
+      // Validate project name — alphanumeric + hyphens/underscores only
+      if (!rawName) {
+        return new Response(JSON.stringify({ success: false, error: 'Project name is required' }), {
+          status: HTTP_STATUS.BAD_REQUEST,
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(rawName) || rawName.length > 64) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Project name must be alphanumeric (hyphens and underscores allowed), max 64 chars'
+        }), {
+          status: HTTP_STATUS.BAD_REQUEST,
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+
+      const thypressHome = path.join(os.homedir(), 'THYPRESS');
+      const newProjectDir = path.join(thypressHome, rawName);
+
+      // Security: ensure the resolved path is within ~/THYPRESS/
+      if (!path.resolve(newProjectDir).startsWith(path.resolve(thypressHome))) {
+        return new Response(JSON.stringify({ success: false, error: 'Invalid project path' }), {
+          status: HTTP_STATUS.BAD_REQUEST,
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+
+      if (fsSync.existsSync(newProjectDir)) {
+        // Check if it's empty
+        const entries = fsSync.readdirSync(newProjectDir);
+        if (entries.length > 0) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: `A folder named "${rawName}" already exists and is not empty. Choose a different name.`
+          }), {
+            status: HTTP_STATUS.BAD_REQUEST,
+            headers: { 'Content-Type': MIME_TYPES.JSON }
+          });
+        }
+      }
+
+      // Scaffold project structure
+      const contentRoot = path.join(newProjectDir, 'content');
+      const pagesDir = path.join(contentRoot, 'pages');
+      fsSync.mkdirSync(pagesDir, { recursive: true });
+
+      // 3-step welcome.md
+      const welcomeMd = `---
+title: Let's make something
+---
+
+# Welcome to THYPRESS
+
+Your site is live. Let's prove it.
+
+## Step 1: Open your files
+Click "Edit your pages" in the admin panel (or open the folder at \`${contentRoot}\`).
+
+## Step 2: Edit this file
+Open \`welcome.md\` in any text editor. Delete this line and type your name. Save.
+
+## Step 3: Watch
+↑ This page just updated. That's THYPRESS — edit a file, see it live.
+
+---
+
+Ready for more? Check the [full guide](https://thypress.org/docs) or
+explore the admin panel to change themes, build your site, and more.
+`;
+      fsSync.writeFileSync(path.join(pagesDir, 'welcome.md'), welcomeMd);
+
+      // config.json
+      const { configDefaults } = await import('./utils/taxonomy.js');
+      const config = configDefaults();
+      config.title = rawName;
+      fsSync.writeFileSync(path.join(newProjectDir, 'config.json'), JSON.stringify(config, null, 2));
+
+      // Trigger full server re-initialization at the new project directory
+      deps.scheduleFullReload(newProjectDir);
+
+      return new Response(JSON.stringify({ success: true, path: newProjectDir }), {
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+
+    } catch (error) {
+      return new Response(JSON.stringify({ success: false, error: error.message }), {
+        status: HTTP_STATUS.SERVER_ERROR,
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+    }
+  }
+
+  // POST: open content folder in native file explorer (local only)
+  if (route === `${adminBase}/open-folder` && request.method === 'POST') {
+    if (!isLocalRequest(request, deps.bunServer)) {
+      return new Response(JSON.stringify({ success: false, error: 'Local access only' }), {
+        status: 403,
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+    }
+
+    const folderPath = deps.contentRoot || process.cwd();
+    const openCmd = process.platform === 'darwin' ? 'open'
+                  : process.platform === 'win32'  ? 'explorer'
+                  : 'xdg-open';
+
+    // execFile bypasses the shell — folderPath is passed as a single argv
+    // entry, immune to injection via $(), backticks, semicolons, pipes, etc.
+    execFile(openCmd, [folderPath], (error) => {
+      if (error) console.error(`open-folder failed: ${error.message}`);
+    });
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { 'Content-Type': MIME_TYPES.JSON }
+    });
+  }
+
+  // POST: shutdown server (local only — remote sessions cannot kill the process)
+  if (route === `${adminBase}/shutdown` && request.method === 'POST') {
+    if (!isLocalRequest(request, deps.bunServer)) {
+      return new Response(JSON.stringify({ success: false, error: 'Local access only' }), {
+        status: 403,
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+    }
+
+    // Respond first, then exit
+    const response = new Response(JSON.stringify({ success: true }), {
+      headers: { 'Content-Type': MIME_TYPES.JSON }
+    });
+    setTimeout(() => process.exit(0), 500);
+    return response;
+  }
+
+  // POST: upload and install theme .zip
+  if (route === `${adminBase}/upload-theme` && request.method === 'POST') {
+    if (!isLocalRequest(request, deps.bunServer)) {
+      return new Response(JSON.stringify({ success: false, error: 'Local access only' }), {
+        status: 403,
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+    }
+
+    try {
+      const formData = await request.formData();
+      const file = formData.get('theme');
+
+      if (!file || typeof file.arrayBuffer !== 'function') {
+        return new Response(JSON.stringify({ success: false, error: 'No .zip file provided' }), {
+          status: HTTP_STATUS.BAD_REQUEST,
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+
+      if (!file.name.endsWith('.zip')) {
+        return new Response(JSON.stringify({ success: false, error: 'File must be a .zip archive' }), {
+          status: HTTP_STATUS.BAD_REQUEST,
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const tempDir = path.join(os.tmpdir(), `thypress-theme-${Date.now()}`);
+      fsSync.mkdirSync(tempDir, { recursive: true });
+
+      // Extract zip
+      const zipBlob = new Blob([buffer]);
+      const reader = new ZipReader(new BlobReader(zipBlob));
+      const entries = await reader.getEntries();
+
+      for (const entry of entries) {
+        if (!entry.directory) {
+          const data = await entry.getData(new BlobWriter());
+          const ab = await data.arrayBuffer();
+          const fullPath = path.join(tempDir, entry.filename);
+          fsSync.mkdirSync(path.dirname(fullPath), { recursive: true });
+          fsSync.writeFileSync(fullPath, Buffer.from(ab));
+        }
+      }
+      await reader.close();
+
+      // Determine theme root and name
+      const tempEntries = fsSync.readdirSync(tempDir);
+      let themeRoot = tempDir;
+      let themeName = path.basename(file.name, '.zip');
+
+      if (tempEntries.length === 1 && fsSync.statSync(path.join(tempDir, tempEntries[0])).isDirectory()) {
+        themeRoot = path.join(tempDir, tempEntries[0]);
+        themeName = tempEntries[0];
+      }
+
+      // Validate
+      if (!fsSync.existsSync(path.join(themeRoot, 'index.html'))) {
+        fsSync.rmSync(tempDir, { recursive: true, force: true });
+        return new Response(JSON.stringify({ success: false, error: 'Invalid theme: index.html not found' }), {
+          status: HTTP_STATUS.BAD_REQUEST,
+          headers: { 'Content-Type': MIME_TYPES.JSON }
+        });
+      }
+
+      // Commit to templates/
+      const templatesDir = path.join(process.cwd(), 'templates');
+      const themeDest = path.join(templatesDir, themeName);
+      fsSync.mkdirSync(templatesDir, { recursive: true });
+      if (fsSync.existsSync(themeDest)) fsSync.rmSync(themeDest, { recursive: true, force: true });
+      fsSync.cpSync(themeRoot, themeDest, { recursive: true });
+      fsSync.rmSync(tempDir, { recursive: true, force: true });
+
+      // The config watcher will trigger a hot reload automatically.
+      // Explicitly reload theme here too for immediate feedback.
+      const { setThemeConfig } = await import('./theme-system.js');
+      setThemeConfig('theme', themeName);
+
+      return new Response(JSON.stringify({ success: true, themeName }), {
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+
+    } catch (error) {
+      return new Response(JSON.stringify({ success: false, error: error.message }), {
+        status: HTTP_STATUS.SERVER_ERROR,
+        headers: { 'Content-Type': MIME_TYPES.JSON }
+      });
+    }
+  }
+
+  // ── END NEW ROUTES ─────────────────────────────────────────────────────────
+
   // GET: admin panel HTML
   if (route === `${adminBase}/` || route === adminBase) {
     const { generateAdminHTML } = await import('./admin-pages.js');
-    const adminHtml = generateAdminHTML(deps, adminBase);
+
+    const isLocal    = isLocalRequest(request, deps.bunServer);
+    const hasProject = deps.contentCache.size > 0
+      || fsSync.existsSync(path.join(process.cwd(), 'config.json'));
+    const isWelcome    = !hasProject && isLocal;
+    const thypressHome = path.join(os.homedir(), 'THYPRESS');
+
+    const adminHtml = generateAdminHTML(deps, adminBase, { isLocal, isWelcome, thypressHome });
     return new Response(adminHtml, {
       headers: securityManager.applySecurityHeaders({ 'Content-Type': MIME_TYPES.HTML })
     });

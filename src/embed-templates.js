@@ -4,8 +4,9 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import Handlebars from 'handlebars';
+
 import matter from 'gray-matter';
+import Handlebars from 'handlebars';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 

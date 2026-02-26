@@ -34,9 +34,13 @@ SPDX-License-Identifier: MPL-2.0
     {{/if}}
   </title>
   <meta name="description" content="{{#if entry.description}}{{entry.description}}{{else}}{{config.description}}{{/if}}">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+
   <style>
     /* Slight modern twist */
-    @import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&display=swap');
     html, body, input, button { font-family: "Lora", serif; font-optical-sizing: auto; font-style: normal; }
 
     /* Bare 1994 — minimal responsive alignment */
@@ -45,7 +49,7 @@ SPDX-License-Identifier: MPL-2.0
     html, body { margin: 0; padding: 0; }
     /* Keep content readable on large screens */
     body {
-        max-width: 40em;
+        max-width: 44em;
         margin: 0 auto;
         padding: 1em;
         line-height: 1.4;
@@ -65,7 +69,12 @@ SPDX-License-Identifier: MPL-2.0
     /* Ensure article doesn't overflow */
     article, article > * { max-width: 100%; overflow-wrap: break-word; }
     article picture { display: block; margin: 1.25em 0; }
-    article img { max-width: 100%; height: auto; display: block; }
+    article img { max-width: 100%; height: auto; display: block;
+        /* Force the browser to respect the width/height attributes instantly */
+        aspect-ratio: attr(width) / attr(height);
+        /* Add a skeleton loader color so you can see the box is reserved */
+        background-color: rgba(0, 0, 0, 0.05);
+    }
     /* Prevent code block overflow */
     article pre { overflow-x: auto; }
   </style>

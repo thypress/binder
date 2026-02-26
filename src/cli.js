@@ -1,14 +1,17 @@
-// SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS)
+// SPDX-FileCopyrightText: 2026 Teo Costa (https://thypress.org)
 // SPDX-License-Identifier: MPL-2.0
 
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { ZipReader, BlobReader, BlobWriter } from '@zip.js/zip.js';
+
+import { isHostileDirectory } from './content-processor.js';
+import { REDIRECT_STATUS_CODES, parseRedirectRules } from './build.js';
 import { configDefaults, getSiteConfig } from './utils/taxonomy.js';
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
-import { REDIRECT_STATUS_CODES, parseRedirectRules } from './build.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -32,9 +35,10 @@ if (process.env.BUNDLERBUS_ORIGINAL_CWD) {
 // ============================================================================
 
 const THYPRESS_MODES = {
-  VIEWER: 'viewer',      // Zero-footprint file viewing (dropped files/folders)
-  PROJECT: 'project',    // Scaffolded project with content/ directory
-  INSTALLER: 'installer' // Theme installation from .zip
+  VIEWER: 'viewer',       // Zero-footprint file viewing (dropped files/folders)
+  PROJECT: 'project',     // Scaffolded project with content/ directory
+  INSTALLER: 'installer', // Theme installation from .zip
+  WELCOME: 'welcome'      // First-run GUI mode — hostile directory detected, no TTY
 };
 
 function parseArgs() {
@@ -141,11 +145,11 @@ function parseArgs() {
 
     // PIN setup — sets/updates the 4-digit admin PIN and exits immediately.
     // Handled here rather than as a separate command so it works standalone:
-    // "thypress --pin 1234" with no other arguments.
+    // "thypress --pin mySecretPIN" with no other arguments.
     if (arg === '--pin') {
       if (i + 1 >= args.length || args[i + 1].startsWith('-')) {
-        console.error(errorMsg('--pin requires a 4-digit number'));
-        console.log(dim('Example: thypress --pin 1234'));
+        console.error(errorMsg('--pin requires at least 6 characters'));
+        console.log(dim('Example: thypress --pin mySecretPIN'));
         process.exit(1);
       }
       handlePINSetup(args[i + 1]);
@@ -181,12 +185,14 @@ function parseArgs() {
 const { command, targetDir, openBrowser, serveAfterBuild, contentDir, skipDirs, redirectAction, themeArchivePath, validateTarget } = parseArgs();
 
 /**
- * Handle --pin flag to set/update PIN
+ * Handle --pin flag to set/update PIN.
+ * Stores as "salt:hash" (salted SHA-256) — identical format to SecurityManager.setPIN.
+ * Validation rules match SecurityManager: 6+ chars, no whitespace.
  */
 function handlePINSetup(pin) {
-  if (!/^\d{4}$/.test(pin)) {
-    console.error(errorMsg('PIN must be exactly 4 digits'));
-    console.log(dim('Example: thypress --pin 1234'));
+  if (pin.length < 6 || /\s/.test(pin)) {
+    console.error(errorMsg('PIN must be at least 6 characters with no spaces'));
+    console.log(dim('Example: thypress --pin mySecretPIN"'));
     process.exit(1);
   }
 
@@ -197,7 +203,11 @@ function handlePINSetup(pin) {
     fs.mkdirSync(configDir, { recursive: true });
   }
 
-  fs.writeFileSync(pinPath, pin, 'utf-8');
+  // Salt + hash — matches SecurityManager.setPIN format exactly:
+  // "salt:hash" where salt = 32 hex chars, hash = 64 hex chars (SHA-256)
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.createHash('sha256').update(salt + pin).digest('hex');
+  fs.writeFileSync(pinPath, `${salt}:${hash}`, 'utf-8');
 
   console.log(success(`✓ PIN set successfully`));
   console.log(dim('Your admin panel is now protected with PIN authentication'));
@@ -236,13 +246,7 @@ function determineIntent() {
   if (zipFile) {
     console.log(info(`Detected: Theme archive (${path.basename(zipFile)})`));
 
-    // Determine where to install theme:
-    // 1. If cwd has config.json → user is working in their project
-    // 2. Else if exe folder has config.json → exe is in a project
-    // 3. Else → use exe folder (will create new project structure)
-
     const cwd = process.cwd();
-    // CRITICAL: Use process.execPath (real exe location), NOT process.argv[0] (virtual path)
     const exeFolder = path.dirname(process.execPath);
     let workingDir;
 
@@ -282,14 +286,10 @@ function determineIntent() {
     if (files.length > 0) {
       console.log(info(`Detected: ${files.length} dropped file(s)`));
 
-      // Check if files are from multiple folders
       const folders = files.map(f => path.dirname(path.resolve(f)));
       const uniqueFolders = [...new Set(folders)];
-
-      // Use first file's folder as working directory
       const firstFileFolder = path.dirname(path.resolve(files[0]));
 
-      // Filter files to only include those from the first folder
       const validFiles = files.filter(f =>
         path.dirname(path.resolve(f)) === firstFileFolder
       );
@@ -309,7 +309,6 @@ function determineIntent() {
 
       console.log(success(`Working with ${validFiles.length} file(s) from: ${firstFileFolder}\n`));
 
-      // Note: Assets/images are only resolvable relative to this folder
       return {
         mode: THYPRESS_MODES.VIEWER,
         workingDir: firstFileFolder,
@@ -338,7 +337,6 @@ function determineIntent() {
         console.log(info(`Detected: Folder (${path.basename(targetFolder)})`));
       }
 
-      // Check if folder has ANY content files (.md, .txt, .html)
       let hasContent = false;
       try {
         const entries = fs.readdirSync(targetFolder);
@@ -355,7 +353,6 @@ function determineIntent() {
         hasContent = false;
       }
 
-      // Check if it has subdirectories with content
       if (!hasContent) {
         try {
           const entries = fs.readdirSync(targetFolder);
@@ -395,7 +392,6 @@ function determineIntent() {
           workingDir: targetFolder
         };
       } else {
-        // Check for images-only folder
         try {
           const entries = fs.readdirSync(targetFolder);
           const hasImages = entries.some(f => {
@@ -406,7 +402,6 @@ function determineIntent() {
               return false;
             }
           });
-
           if (hasImages) {
             console.log(info('Folder contains images but no content files'));
           }
@@ -427,6 +422,34 @@ function determineIntent() {
   const cwd = targetDir || process.cwd();
   console.log(info(`Running in: ${cwd}`));
 
+  // ── WELCOME MODE GATE ────────────────────────────────────────────────────
+  // GUI double-click: no TTY + hostile directory (Downloads, Desktop, etc.)
+  // → chdir to ~/THYPRESS/ BEFORE server starts so .thypress/ secrets never
+  //   land in the hostile directory.
+  if (!process.stdout.isTTY && isHostileDirectory(cwd)) {
+    console.log(info('Hostile directory detected in GUI mode — entering Welcome mode'));
+
+    const thypressHome = path.join(os.homedir(), 'THYPRESS');
+    if (!fs.existsSync(thypressHome)) {
+      fs.mkdirSync(thypressHome, { recursive: true });
+    }
+    process.chdir(thypressHome);
+
+    return {
+      mode: THYPRESS_MODES.WELCOME,
+      workingDir: thypressHome
+    };
+  }
+
+  // TTY + hostile directory → warn but continue (user deliberately navigated here)
+  if (process.stdout.isTTY && isHostileDirectory(cwd)) {
+    console.log(warning('This looks like a system folder (Downloads, Desktop, etc.)'));
+    console.log(info('THYPRESS works best when run from a project directory.'));
+    console.log(dim('Consider: cd ~/my-site && thypress serve'));
+    console.log('');
+  }
+  // ── END WELCOME MODE GATE ────────────────────────────────────────────────
+
   // Check for content files in root
   let rootFiles = [];
   try {
@@ -444,7 +467,6 @@ function determineIntent() {
     rootFiles = [];
   }
 
-  // Check for content/ directory
   const contentDirPath = path.join(cwd, contentDir || 'content');
   const hasContentDir = fs.existsSync(contentDirPath);
 
@@ -478,6 +500,242 @@ function determineIntent() {
 // SCAFFOLDING - Only runs in PROJECT mode
 // ============================================================================
 
+/**
+ * Build the 3-step welcome.md content for new projects.
+ * @param {string} contentRoot - Absolute path to the content root directory
+ * @returns {string} Markdown content
+ */
+function buildWelcomeMd(contentRoot) {
+  return `---
+title: Let's make something
+---
+
+# Welcome to THYPRESS
+
+Your site is live. Let's prove it.
+
+## Step 1: Open your files
+Click "Edit your pages" in the admin panel (or open the folder at \`${contentRoot}\`).
+
+## Step 2: Edit this file
+Open \`welcome.md\` in any text editor. Delete this line and type your name. Save.
+
+## Step 3: Watch
+↑ This page just updated. That's THYPRESS — edit a file, see it live.
+
+---
+
+Ready for more? Check the [full guide](https://thypress.org/docs) or
+explore the admin panel to change themes, build your site, and more.
+`;
+}
+
+// const examplePage = path.join(pagesDir, '2024-01-01-welcome.md');
+// fs.writeFileSync(examplePage, `---
+// title: Welcome to THYPRESS!
+// createdAt: 2024-01-01
+// updatedAt: 2024-01-15
+// tags: [blogging, markdown, documentation]
+// categories: [tutorials]
+// description: Your first page with THYPRESS - learn about features and get started
+// ---
+
+// # Welcome to THYPRESS!
+
+// This is your first page. Create more \`.md\` files in \`content/pages/\`.
+
+// ## Getting Started
+
+// THYPRESS is a **static site generator** with a built-in HTTP server. It's designed for speed, simplicity, and flexibility.
+
+// ### Writing Content
+
+// Add YAML front matter to your pages:
+
+// \`\`\`yaml
+// ---
+// title: My Page Title
+// createdAt: 2024-01-01
+// updatedAt: 2024-01-15
+// tags: [tag1, tag2]
+// categories: [programming]
+// series: Getting Started
+// description: A short description
+// draft: false  # Set to true to hide from site
+// permalink: /custom-url/  # Optional: custom URL
+// ---
+// \`\`\`
+
+// ### File Formats
+
+// THYPRESS supports three content types:
+
+// - **Markdown** (\`.md\`) - Full CommonMark + GFM support
+// - **Plain text** (\`.txt\`) - Rendered in \`<pre>\` tags (HTML-escaped for security)
+// - **HTML** (\`.html\`) - Complete documents or fragments
+
+// ## THYPRESS Conventions
+
+// ### Drafts (Content)
+
+// Keep work-in-progress content hidden with these methods:
+
+// 1. **\`drafts/\` folder** - Place anywhere in \`content/\`:
+// \`\`\`
+// content/
+// ├── pages/
+// │   ├── published.md
+// │   └── drafts/         ← Everything here is ignored
+// │       └── wip.md
+// └── drafts/             ← Top-level drafts
+//  └── another-wip.md
+// \`\`\`
+
+// 2. **\`draft: true\` in front matter**:
+// \`\`\`yaml
+// ---
+// title: Work in Progress
+// draft: true
+// ---
+// \`\`\`
+
+// 3. **Dot prefix** - Files starting with \`.hidden.md\` are ignored
+
+// ### Partials (Templates)
+
+// Reusable template components use similar conventions:
+
+// 1. **\`partials/\` folder** in your theme:
+// \`\`\`
+// templates/.default/
+// ├── index.html
+// ├── entry.html
+// └── partials/           ← Auto-registered as partials
+//  ├── header.html
+//  └── footer.html
+// \`\`\`
+
+// 2. **Underscore prefix** - \`_header.html\` is auto-registered as a partial
+
+// 3. **\`partial: true\` in front matter**:
+// \`\`\`yaml
+// ---
+// partial: true
+// ---
+// \`\`\`
+
+// ## Features
+
+// - 📝 **Markdown** with syntax highlighting
+// - 🏷️ **Taxonomies** - Tags, categories, and series
+// - 🔗 **Related content** based on shared tags
+// - 📊 **Table of contents** (auto-generated from headings)
+// - 🔄 **Hot reload** templates and content automatically
+// - 🎨 **Themes** - Handlebars templates
+// - 📰 **RSS feeds** - Global, per-tag, per-category, per-series
+// - 🗺️ **Sitemap** generation
+// - 🔍 **Search index** (JSON)
+// - 🖼️ **Image optimization** with responsive sizes
+// - ⚡ **Fast builds** with parallel processing
+// - 🎯 **URL redirects** with pattern matching
+// - 📱 **Mobile-friendly** default theme
+
+// ## Theme System
+
+// THYPRESS uses Handlebars templates. The minimum viable theme is just \`index.html\`:
+
+// \`\`\`handlebars
+// <!DOCTYPE html>
+// <html>
+// <head>
+// <title>{{config.title}}</title>
+// </head>
+// <body>
+// {{#if entry}}
+// <article>
+// <h1>{{entry.title}}</h1>
+// {{{entry.html}}}
+// </article>
+// {{else}}
+// <ul>
+// {{#each entries}}
+//   <li><a href="{{url}}">{{title}}</a></li>
+// {{/each}}
+// </ul>
+// {{/if}}
+// </body>
+// </html>
+// \`\`\`
+
+// ### Available Templates
+
+// - \`index.html\` - Required: Homepage and lists
+// - \`entry.html\` - Individual content pages
+// - \`tag.html\` - Tag archives
+// - \`category.html\` - Category archives
+// - \`series.html\` - Series archives
+// - \`404.html\` - Not found page
+
+// ### Template Variables
+
+// All templates receive:
+
+// - \`config\` - Site configuration
+// - \`navigation\` - Site navigation tree
+// - \`theme\` - Theme metadata
+
+// **Entry pages** get:
+
+// - \`entry\` - Current entry object
+// - \`frontMatter\` - Raw front matter
+// - \`prevEntry\` / \`nextEntry\` - Navigation
+// - \`relatedEntries\` - Tag-based suggestions
+// - \`toc\` - Table of contents
+
+// **List pages** get:
+
+// - \`entries\` - Array of entries
+// - \`pagination\` - Pagination data (if applicable)
+// - \`tag\` / \`category\` / \`series\` - Current taxonomy term
+
+// ## CLI Commands
+
+// \`\`\`bash
+// thypress serve              # Start dev server
+// thypress build              # Build static site
+// thypress build --serve      # Build + preview
+// thypress clean              # Delete cache
+// \`\`\`
+
+// ## Configuration
+
+// Edit \`config.json\`:
+
+// \`\`\`json
+// {
+// "title": "My Site",
+// "description": "A site powered by THYPRESS",
+// "url": "https://example.com",
+// "author": "Your Name",
+// "theme": ".default",
+// "contentDir": "content",
+// "readingSpeed": 200,
+// "escapeTextFiles": true,
+// "strictImages": false,
+// "fingerprintAssets": false
+// }
+// \`\`\`
+
+// ## Next Steps
+
+// 1. Edit this file or create new \`.md\` files
+// 2. Install a theme by dragging a \`.zip\` file onto the THYPRESS executable
+// 3. Customize your \`config.json\`
+// 4. Run \`thypress build\` to export your site
+
+// Happy writing! 🎉
+// `);
+
 async function ensureDefaults(intent) {
   const currentDir = intent.workingDir;
 
@@ -486,6 +744,16 @@ async function ensureDefaults(intent) {
 
   console.log(bright(`Intent: ${intent.mode.toUpperCase()}`));
   console.log(info(`Working directory: ${currentDir}\n`));
+
+  // ========================================================================
+  // WELCOME MODE: No scaffolding — server starts, browser goes to admin panel
+  // ========================================================================
+  if (intent.mode === THYPRESS_MODES.WELCOME) {
+    console.log(success('Welcome mode — server will start, browser will open admin panel'));
+    console.log(dim('No files created until user chooses to create a project.'));
+    console.log('');
+    return;
+  }
 
   // ========================================================================
   // VIEWER MODE: Zero footprint - NO scaffolding
@@ -524,211 +792,9 @@ async function ensureDefaults(intent) {
       fs.mkdirSync(pagesDir, { recursive: true });
       console.log(success(`Created ${path.relative(currentDir, contentRoot)}/`));
 
-      const examplePage = path.join(pagesDir, '2024-01-01-welcome.md');
-      fs.writeFileSync(examplePage, `---
-title: Welcome to THYPRESS!
-createdAt: 2024-01-01
-updatedAt: 2024-01-15
-tags: [blogging, markdown, documentation]
-categories: [tutorials]
-description: Your first page with THYPRESS - learn about features and get started
----
-
-# Welcome to THYPRESS!
-
-This is your first page. Create more \`.md\` files in \`content/pages/\`.
-
-## Getting Started
-
-THYPRESS is a **static site generator** with a built-in HTTP server. It's designed for speed, simplicity, and flexibility.
-
-### Writing Content
-
-Add YAML front matter to your pages:
-
-\`\`\`yaml
----
-title: My Page Title
-createdAt: 2024-01-01
-updatedAt: 2024-01-15
-tags: [tag1, tag2]
-categories: [programming]
-series: Getting Started
-description: A short description
-draft: false  # Set to true to hide from site
-permalink: /custom-url/  # Optional: custom URL
----
-\`\`\`
-
-### File Formats
-
-THYPRESS supports three content types:
-
-- **Markdown** (\`.md\`) - Full CommonMark + GFM support
-- **Plain text** (\`.txt\`) - Rendered in \`<pre>\` tags (HTML-escaped for security)
-- **HTML** (\`.html\`) - Complete documents or fragments
-
-## THYPRESS Conventions
-
-### Drafts (Content)
-
-Keep work-in-progress content hidden with these methods:
-
-1. **\`drafts/\` folder** - Place anywhere in \`content/\`:
-   \`\`\`
-   content/
-   ├── pages/
-   │   ├── published.md
-   │   └── drafts/         ← Everything here is ignored
-   │       └── wip.md
-   └── drafts/             ← Top-level drafts
-       └── another-wip.md
-   \`\`\`
-
-2. **\`draft: true\` in front matter**:
-   \`\`\`yaml
-   ---
-   title: Work in Progress
-   draft: true
-   ---
-   \`\`\`
-
-3. **Dot prefix** - Files starting with \`.hidden.md\` are ignored
-
-### Partials (Templates)
-
-Reusable template components use similar conventions:
-
-1. **\`partials/\` folder** in your theme:
-   \`\`\`
-   templates/.default/
-   ├── index.html
-   ├── entry.html
-   └── partials/           ← Auto-registered as partials
-       ├── header.html
-       └── footer.html
-   \`\`\`
-
-2. **Underscore prefix** - \`_header.html\` is auto-registered as a partial
-
-3. **\`partial: true\` in front matter**:
-   \`\`\`yaml
-   ---
-   partial: true
-   ---
-   \`\`\`
-
-## Features
-
-- 📝 **Markdown** with syntax highlighting
-- 🏷️ **Taxonomies** - Tags, categories, and series
-- 🔗 **Related content** based on shared tags
-- 📊 **Table of contents** (auto-generated from headings)
-- 🔄 **Hot reload** templates and content automatically
-- 🎨 **Themes** - Handlebars templates
-- 📰 **RSS feeds** - Global, per-tag, per-category, per-series
-- 🗺️ **Sitemap** generation
-- 🔍 **Search index** (JSON)
-- 🖼️ **Image optimization** with responsive sizes
-- ⚡ **Fast builds** with parallel processing
-- 🎯 **URL redirects** with pattern matching
-- 📱 **Mobile-friendly** default theme
-
-## Theme System
-
-THYPRESS uses Handlebars templates. The minimum viable theme is just \`index.html\`:
-
-\`\`\`handlebars
-<!DOCTYPE html>
-<html>
-<head>
-  <title>{{config.title}}</title>
-</head>
-<body>
-  {{#if entry}}
-    <article>
-      <h1>{{entry.title}}</h1>
-      {{{entry.html}}}
-    </article>
-  {{else}}
-    <ul>
-      {{#each entries}}
-        <li><a href="{{url}}">{{title}}</a></li>
-      {{/each}}
-    </ul>
-  {{/if}}
-</body>
-</html>
-\`\`\`
-
-### Available Templates
-
-- \`index.html\` - Required: Homepage and lists
-- \`entry.html\` - Individual content pages
-- \`tag.html\` - Tag archives
-- \`category.html\` - Category archives
-- \`series.html\` - Series archives
-- \`404.html\` - Not found page
-
-### Template Variables
-
-All templates receive:
-
-- \`config\` - Site configuration
-- \`navigation\` - Site navigation tree
-- \`theme\` - Theme metadata
-
-**Entry pages** get:
-
-- \`entry\` - Current entry object
-- \`frontMatter\` - Raw front matter
-- \`prevEntry\` / \`nextEntry\` - Navigation
-- \`relatedEntries\` - Tag-based suggestions
-- \`toc\` - Table of contents
-
-**List pages** get:
-
-- \`entries\` - Array of entries
-- \`pagination\` - Pagination data (if applicable)
-- \`tag\` / \`category\` / \`series\` - Current taxonomy term
-
-## CLI Commands
-
-\`\`\`bash
-thypress serve              # Start dev server
-thypress build              # Build static site
-thypress build --serve      # Build + preview
-thypress clean              # Delete cache
-\`\`\`
-
-## Configuration
-
-Edit \`config.json\`:
-
-\`\`\`json
-{
-  "title": "My Site",
-  "description": "A site powered by THYPRESS",
-  "url": "https://example.com",
-  "author": "Your Name",
-  "theme": ".default",
-  "contentDir": "content",
-  "readingSpeed": 200,
-  "escapeTextFiles": true,
-  "strictImages": false,
-  "fingerprintAssets": false
-}
-\`\`\`
-
-## Next Steps
-
-1. Edit this file or create new \`.md\` files
-2. Install a theme by dragging a \`.zip\` file onto the THYPRESS executable
-3. Customize your \`config.json\`
-4. Run \`thypress build\` to export your site
-
-Happy writing! 🎉
-`);
+      // 3-step welcome.md — concise tutorial, not a reference manual
+      const examplePage = path.join(pagesDir, 'welcome.md');
+      fs.writeFileSync(examplePage, buildWelcomeMd(contentRoot));
       console.log(success(`Created ${path.relative(currentDir, examplePage)}`));
     }
 
@@ -862,6 +928,26 @@ async function installThemeFromArchive(zipPath, targetDir) {
     console.log('');
     console.log(dim('  • Manage all themes: localhost:3009/__thypress'));
     console.log('');
+
+    // ── GUI MODE (no TTY): auto-activate, skip interactive prompt ───────────
+    // This runs when a .zip is dragged onto the exe — no terminal is visible.
+    if (!process.stdin.isTTY) {
+      console.log(info(`Auto-activating theme: ${themeName}...`));
+
+      const configPath = path.join(targetDir, 'config.json');
+      let config = {};
+      if (fs.existsSync(configPath)) {
+        try { config = JSON.parse(fs.readFileSync(configPath, 'utf-8')); } catch {}
+      }
+      config.theme = themeName;
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+      console.log(success(`✓ Theme installed and activated: ${themeName}`));
+      console.log(dim('If THYPRESS is running, it will hot-reload automatically.'));
+      process.exit(0);
+    }
+    // ── END GUI MODE ─────────────────────────────────────────────────────────
+
     console.log(dim('  ─────────────────────────────────────────'));
     console.log('');
     console.log(bright('  [Enter]    ') + 'Activate this theme now');
@@ -1345,8 +1431,9 @@ async function validateRedirectsCommand() {
 async function validateContentCommand() {
   console.log(bright('Validating content...\n'));
 
-  const { loadAllContent, getAllTags } = await import('./renderer.js');
-  const { contentCache, brokenImages } = loadAllContent();
+  const { loadAllContent } = await import('./content-processor.js');
+  const { getAllTags } = await import('./utils/taxonomy.js');
+  const { contentCache, brokenImages } = await loadAllContent();
 
   console.log(success(`✓ Loaded ${contentCache.size} entries`));
 

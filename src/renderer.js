@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS <https://thypress.org>)
 // SPDX-License-Identifier: MPL-2.0
 
+import { Readable } from 'stream';
+
 import { Feed } from 'feed';
 import { SitemapStream, streamToPromise } from 'sitemap';
-import { Readable } from 'stream';
+
 import { buildTemplateContext } from './utils/template-context.js';
 import { getEntriesSorted, getAllTags, getAllCategories, getAllSeries, slugify } from './utils/taxonomy.js';
 
@@ -90,6 +92,43 @@ export function renderEntryList(contentCache, page, templates, navigation, siteC
 
 /**
  * Render individual entry page
+ *
+ * Template resolution priority (deterministic, single-pass):
+ *
+ * 1. Explicit front-matter: entry.template
+ * The file declares exactly which template it wants. Highest priority,
+ * no ambiguity. Works whether or not directory templates are enabled.
+ *
+ * 2. Explicit front-matter: entry.layout (alias for template)
+ * Provided for compatibility with conventions from other SSGs where
+ * "layout" is the customary key. Identical semantics to entry.template.
+ *
+ * 3. Opt-in directory-based templates (requires siteConfig.matchTemplateToClosestDir === true)
+ * When enabled, walks entry.sectionPath (an ordered array of path segments
+ * from content root to the file, deepest first) and picks the first
+ * segment whose name matches a loaded theme template.
+ *
+ * Example: content/recipes/italian/vegan/sorbet.md
+ * entry.sectionPath = ["recipes", "italian", "vegan"]
+ * Resolution attempts: vegan.html → italian.html → recipes.html
+ * The deepest (most specific) match wins, mirroring CSS specificity.
+ *
+ * Disabled by default to protect VIEWER-mode users from unexpected
+ * layout changes caused by accidental folder/template name collisions.
+ * Enable with matchTemplateToClosestDir: true in config.json.
+ *
+ * 4. Canonical fallback: 'entry' template
+ * Standard THYPRESS entry template. Used for all unmatched entries
+ * in a properly structured multi-template theme.
+ *
+ * 5. Ultimate safety net: 'index' template
+ * Guarantees a page renders even in single-file themes that provide
+ * only index.html (single-file detection in theme-system.js maps all
+ * types to index, but this catch-all covers edge cases).
+ *
+ * 6. Hard throw
+ * Only reached if the theme provides zero usable templates — an
+ * unrecoverable configuration error that must be surfaced immediately.
  */
 export function renderEntry(entry, slug, templates, navigation, siteConfig = {}, contentCache = null, themeMetadata = {}) {
   // If content is pure HTML (not a markdown post), return it directly if rendered
@@ -98,25 +137,49 @@ export function renderEntry(entry, slug, templates, navigation, siteConfig = {},
   }
 
   // ROBUST TEMPLATE SELECTION (Inlined to remove dependency on theme-system.js)
-  // 1. Default to 'entry'
-  let template = templates.get('entry');
+  let template = null;
 
-  // 2. Check for explicit template override in front-matter
+  // 1. Explicit front-matter: template
   if (entry.template && templates.has(entry.template)) {
     template = templates.get(entry.template);
   }
-  // 3. Check for layout hint in front-matter
+  // 2. Explicit front-matter: layout (alias for template)
   else if (entry.layout && templates.has(entry.layout)) {
     template = templates.get(entry.layout);
   }
-
-  // 4. Fallback Safety
-  if (!template) {
-    if (templates.has('index')) {
-      template = templates.get('index');
-    } else {
-      throw new Error(`Template not found for entry: ${slug} (and no 'index' fallback)`);
+  // 3. Opt-in directory-based templates (deepest segment wins)
+  //    entry.sectionPath is an array like ["recipes", "italian", "vegan"].
+  //    We walk from the end (deepest / most specific) toward index 0
+  //    (shallowest), picking the first segment that matches a template.
+  //    entry.section (string) is intentionally NOT used here — it is the
+  //    top-level folder kept as a plain string for Handlebars theme logic.
+  else if (
+    siteConfig.matchTemplateToClosestDir === true &&
+    Array.isArray(entry.sectionPath) &&
+    entry.sectionPath.length > 0
+  ) {
+    for (let i = entry.sectionPath.length - 1; i >= 0; i--) {
+      if (entry.sectionPath[i] && templates.has(entry.sectionPath[i])) {
+        template = templates.get(entry.sectionPath[i]);
+        break;
+      }
     }
+    // If no segment matched a template, fall through to canonical defaults below.
+  }
+
+  // 4. Canonical fallback: 'entry' template
+  if (!template && templates.has('entry')) {
+    template = templates.get('entry');
+  }
+
+  // 5. Ultimate safety net: 'index' template
+  if (!template && templates.has('index')) {
+    template = templates.get('index');
+  }
+
+  // 6. Hard throw — no template found at all
+  if (!template) {
+    throw new Error(`Template not found for entry: ${slug} (and no 'index' fallback)`);
   }
 
   const createdAtISO = new Date(entry.createdAt).toISOString();
@@ -158,6 +221,8 @@ export function renderEntry(entry, slug, templates, navigation, siteConfig = {},
       ogImage: entry.ogImage || null,
       wordCount: entry.wordCount,
       readingTime: entry.readingTime,
+      section: entry.section || null,           // CRITICAL: Now exposed to templates
+      sectionPath: entry.sectionPath || null,   // CRITICAL: Now exposed to templates
       categories: entry.categories || [],
       series: entry.series || null,
       // CRITICAL: Include ALL custom front-matter fields for theme flexibility

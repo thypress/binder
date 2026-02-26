@@ -2,16 +2,22 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
+
 import sharp from 'sharp';
 import matter from 'gray-matter';
 import MarkdownIt from 'markdown-it';
 import markdownItAnchor from 'markdown-it-anchor';
 import markdownItAlerts from 'markdown-it-github-alerts';
+import markdownItFootnote from 'markdown-it-footnote';
 import markdownItContainer from 'markdown-it-container';
+import markdownItTaskLists from 'markdown-it-task-lists';
 import markdownItHighlight from 'markdown-it-highlightjs';
+import { katex } from '@mdit/plugin-katex';
 import { parseDocument } from 'htmlparser2';
+
 import { success, error as errorMsg, warning, info, dim } from './utils/colors.js';
 import { slugify, normalizeToWebPath, getSiteConfig } from './utils/taxonomy.js';
 
@@ -25,11 +31,11 @@ const md = new MarkdownIt({
   typographer: true
 });
 
+md.use(markdownItAnchor, { permalink: false, slugify: (s) => slugify(s) });
+md.use(markdownItFootnote);
+md.use(markdownItTaskLists, { enabled: true, label: true, labelAfter: true });
 md.use(markdownItHighlight);
-md.use(markdownItAnchor, {
-  permalink: false,
-  slugify: (s) => slugify(s)
-});
+md.use(katex);
 
 // ============================================================================
 // CONSTANTS
@@ -57,6 +63,36 @@ const DEFAULT_SKIP_DIRS = [
   '__tests__'
 ];
 
+/**
+ * Check if a directory is "hostile" for THYPRESS operation.
+ * Triggers Welcome mode when no TTY is attached.
+ * Zero false positives for real content dirs (no .exe next to blog posts).
+ * @param {string} dirPath - Absolute path to check
+ * @returns {boolean}
+ */
+export function isHostileDirectory(dirPath) {
+  const dirName = path.basename(dirPath).toLowerCase();
+  const osJunkDirs = [
+    'downloads', 'desktop', 'documents', 'tmp', 'temp',
+    'téléchargements', 'escritorio', 'área de trabalho',
+    'descargas', 'bureau', 'scaricati', 'schreibtisch'
+  ];
+
+  if (osJunkDirs.includes(dirName)) return true;
+
+  try {
+    const entries = fs.readdirSync(dirPath);
+    const hasNoise = entries.some(f =>
+      /\.(exe|msi|dmg|app|zip|rar|7z|iso|torrent|pkg|deb|rpm|appimage)$/i.test(f)
+    );
+    if (hasNoise) return true;
+  } catch {}
+
+  if (path.resolve(dirPath) === path.resolve(os.homedir())) return true;
+
+  return false;
+}
+
 // ============================================================================
 // RESERVED FIELDS FOR PROTECTED SPREAD
 // ============================================================================
@@ -67,7 +103,7 @@ const DEFAULT_SKIP_DIRS = [
 const RESERVED_FIELDS = new Set([
   'slug', 'url', 'filename', 'title', 'date', 'createdAt', 'updatedAt',
   'tags', 'categories', 'series', 'html', 'rawContent', 'description',
-  'ogImage', 'wordCount', 'readingTime', 'section', 'type', 'toc',
+  'ogImage', 'wordCount', 'readingTime', 'section', 'sectionPath', 'type', 'toc',
   'headings', 'relativePath', 'dateISO', 'createdAtISO', 'updatedAtISO',
   'renderedHtml'
 ]);
@@ -358,7 +394,11 @@ function setupImageOptimizer(md) {
     let sizesToGenerate = [...STANDARD_IMAGE_SIZES];
 
     const imageDimensionsCache = env.imageDimensionsCache || new Map();
-    const originalWidth = imageDimensionsCache.get(resolvedImagePath);
+    const cachedData = imageDimensionsCache.get(resolvedImagePath);
+
+    // Support both old cache (just a number) and new cache ({width, height})
+    const originalWidth = typeof cachedData === 'object' ? cachedData.width : cachedData;
+    const originalHeight = typeof cachedData === 'object' ? cachedData.height : null;
 
     if (originalWidth) {
       sizesToGenerate = STANDARD_IMAGE_SIZES.filter(size => size < originalWidth);
@@ -368,7 +408,15 @@ function setupImageOptimizer(md) {
       sizesToGenerate.sort((a, b) => a - b);
     }
 
+    // Determine if this is the first image on the page
     if (!env.referencedImages) env.referencedImages = [];
+    const isFirstImage = env.referencedImages.length === 0;
+
+    // The Ultimate LCP (Largest Contentful Paint) Fix
+    const loadingAttr = isFirstImage ? 'eager' : 'lazy';
+    const decodingAttr = isFirstImage ? 'sync' : 'async';
+    const fetchPriorityAttr = isFirstImage ? ' fetchpriority="high"' : '';
+
     env.referencedImages.push({
       src,
       resolvedPath: resolvedImagePath,
@@ -378,6 +426,10 @@ function setupImageOptimizer(md) {
       urlBase,
       sizesToGenerate
     });
+
+    // Build the intrinsic dimension attributes
+    const widthAttr = originalWidth ? ` width="${originalWidth}"` : '';
+    const heightAttr = originalHeight ? ` height="${originalHeight}"` : '';
 
     return `<picture>
   <source
@@ -390,9 +442,9 @@ function setupImageOptimizer(md) {
     sizes="(max-width: ${sizesToGenerate[0]}px) ${sizesToGenerate[0]}px, (max-width: ${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}px) ${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}px, ${sizesToGenerate[sizesToGenerate.length - 1]}px">
   <img
     src="/${urlBase}${basename}-${sizesToGenerate[Math.floor(sizesToGenerate.length / 2)]}-${hash}.jpg"
-    alt="${alt}"
-    loading="lazy"
-    decoding="async">
+    alt="${alt}"${widthAttr}${heightAttr}
+    loading="${loadingAttr}"
+    decoding="${decodingAttr}"${fetchPriorityAttr}>
 </picture>`;
   };
 }
@@ -558,7 +610,7 @@ export function processPageMetadata(content, filename, frontMatter, isMarkdown, 
   }
 
   // ========================================================================
-  // DATE EXTRACTION (unchanged, this part is fine)
+  // DATE EXTRACTION
   // ========================================================================
 
   let createdAt = frontMatter.createdAt || frontMatter.date;
@@ -629,14 +681,38 @@ export function generateUrl(relativePath) {
 // ============================================================================
 
 /**
- * Process a single content file
+ * Process a single content file.
  *
- * Protected spread implementation
- * - Reserved fields (slug, url, title, etc.) are set first
- * - Custom front-matter fields are filtered to exclude reserved names
- * - Safe custom fields are spread at the root level for template access
+ * Protected spread implementation:
+ * - Reserved fields (slug, url, title, etc.) are set explicitly first.
+ * - Custom front-matter fields are filtered to exclude reserved names.
+ * - Safe custom fields are spread at the root level for template access.
+ *
+ * SECTION FIELDS — two separate values with distinct consumers:
+ *
+ *   section (string | null)
+ *     The name of the top-level folder directly under the content root.
+ *     Kept as a plain string so Handlebars templates can safely use equality
+ *     checks such as {{#if (eq entry.section "podcast")}}.
+ *     Null when the file lives directly in the content root.
+ *     Example: content/recipes/italian/vegan/sorbet.md → "recipes"
+ *
+ *   sectionPath (string[] | null)
+ *     ALL folder segments between the content root and the file (the filename
+ *     itself is excluded). Used exclusively by the engine's folder routing
+ *     logic (siteConfig.matchTemplateToClosestDir === true). The engine walks this array
+ *     from the deepest segment toward index 0, picking the first segment that
+ *     matches a loaded theme template name (deepest / most specific wins,
+ *     mirroring CSS specificity).
+ *     Null when the file lives directly in the content root.
+ *     Example: content/recipes/italian/vegan/sorbet.md
+ *              → ["recipes", "italian", "vegan"]
+ *
+ * Theme authors should always use entry.section (string) in templates.
+ * The engine uses entry.sectionPath (array) internally. Never expose
+ * sectionPath to templates — it is an implementation detail.
  */
-export function processContentFile(fullPath, relativePath, mode, contentDir, siteConfig = {}, cachedContent = null) {
+export function processContentFile(fullPath, relativePath, mode, contentDir, siteConfig = {}, cachedContent = null, cachedTokens = null) {
   const ext = path.extname(fullPath).toLowerCase();
   const isMarkdown = ext === '.md';
   const isHtml = ext === '.html';
@@ -669,11 +745,15 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
 
     const intent = detectHtmlIntent(htmlContent, frontMatter);
 
-    let section = null;
-    if (mode === 'structured') {
-      const parts = webPath.split('/');
-      section = parts.length > 1 ? parts[0] : null;
-    }
+    // section (string): top-level folder name — safe for Handlebars equality.
+    // sectionPath (array): all folder segments — used by the matchTemplateToClosestDir engine.
+    // Both are null when the file is in the content root (no containing folder).
+    // The mode === 'structured' guard has been intentionally removed: no current
+    // code path ever sets mode to 'structured', so the guard was always false and
+    // both values were always null, making matchTemplateToClosestDir permanently inert.
+    const parts = webPath.split('/');
+    const section     = parts.length > 1 ? parts[0]            : null;
+    const sectionPath = parts.length > 1 ? parts.slice(0, -1)  : null;
 
     let toc = [];
     let headings = [];
@@ -708,8 +788,8 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
         filename: webPath,
         slug: slug,
         url: url,
-        title: title,  // Now uses 4-layer fallback with hash
-        date: createdAt,  // Now extracts from filename
+        title: title,
+        date: createdAt,
         createdAt: createdAt,
         updatedAt: updatedAt,
         tags: Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []),
@@ -719,9 +799,12 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
         relativePath: webPath,
         ogImage: frontMatter.image || null,
         type: 'html',
-        wordCount: wordCount,  // Now calculated
-        readingTime: readingTime,  // Now calculated
+        wordCount: wordCount,
+        readingTime: readingTime,
+        // section: plain string for Handlebars theme logic.
+        // sectionPath: array for the engine's matchTemplateToClosestDir — not for templates.
         section: section,
+        sectionPath: sectionPath,
         toc: toc,
         headings: headings,
         categories: taxonomies.categories,
@@ -765,7 +848,9 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
   };
 
   const renderedHtml = isMarkdown
-    ? md.render(content, env)
+    ? (cachedTokens
+        ? md.renderer.render(cachedTokens, md.options, env)
+        : md.render(content, env))
     : siteConfig.escapeTextFiles !== false
       ? `<pre>${escapeHtml(content)}</pre>`
       : `<pre>${content}</pre>`;
@@ -782,11 +867,15 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
   const tags = Array.isArray(frontMatter.tags) ? frontMatter.tags : (frontMatter.tags ? [frontMatter.tags] : []);
   const description = frontMatter.description || '';
 
-  let section = null;
-  if (mode === 'structured') {
-    const parts = webPath.split('/');
-    section = parts.length > 1 ? parts[0] : null;
-  }
+  // section (string): top-level folder name — safe for Handlebars equality.
+  // sectionPath (array): all folder segments — used by the matchTemplateToClosestDir engine.
+  // Both are null when the file is in the content root (no containing folder).
+  // The mode === 'structured' guard has been intentionally removed: no current
+  // code path ever sets mode to 'structured', so the guard was always false and
+  // both values were always null, making matchTemplateToClosestDir permanently inert.
+  const parts = webPath.split('/');
+  const section     = parts.length > 1 ? parts[0]            : null;
+  const sectionPath = parts.length > 1 ? parts.slice(0, -1)  : null;
 
   let ogImage = frontMatter.image || null;
   if (!ogImage && env.referencedImages.length > 0) {
@@ -825,7 +914,10 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
       ogImage: ogImage,
       wordCount: wordCount,
       readingTime: readingTime,
+      // section: plain string for Handlebars theme logic.
+      // sectionPath: array for the engine's matchTemplateToClosestDir — not for templates.
       section: section,
+      sectionPath: sectionPath,
       type: isMarkdown ? 'markdown' : 'text',
       toc: toc,
       headings: env.headings,
@@ -842,170 +934,6 @@ export function processContentFile(fullPath, relativePath, mode, contentDir, sit
 // ============================================================================
 // CONTENT STRUCTURE DETECTION
 // ============================================================================
-
-/**
- * Detect content structure and determine mode
- * Now accepts explicit mode from CLI intent system
- */
-// export function detectContentStructure(workingDir, options = {}) {
-//   const {
-//     cliContentDir = null,
-//     cliSkipDirs = null,
-//     intentMode = null,
-//     intentContentRoot = null
-//   } = options;
-
-//   console.log(dim(`Detecting content structure in: ${workingDir}`));
-
-//   // ========================================================================
-//   // PRIORITY 1: Intent system override
-//   // If CLI has already determined mode and contentRoot, use it directly
-//   // ========================================================================
-//   if (intentMode && intentContentRoot) {
-//     console.log(info(`Using intent-determined mode: ${intentMode}`));
-//     console.log(info(`Content root: ${intentContentRoot}`));
-
-//     return {
-//       contentRoot: intentContentRoot,
-//       mode: intentMode,
-//       shouldInit: false
-//     };
-//   }
-
-//   // ========================================================================
-//   // PRIORITY 2: Check config.json for custom contentDir
-//   // ========================================================================
-//   let config = {};
-//   try {
-//     const configPath = path.join(workingDir, 'config.json');
-//     if (fs.existsSync(configPath)) {
-//       config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-
-//       if (config.contentDir) {
-//         const customContentDir = path.join(workingDir, config.contentDir);
-
-//         if (fs.existsSync(customContentDir)) {
-//           console.log(success(`Using custom content directory from config: ${config.contentDir}/`));
-
-//           return {
-//             contentRoot: customContentDir,
-//             mode: 'viewer',
-//             customDir: config.contentDir
-//           };
-//         } else {
-//           console.log(warning(`Config specifies contentDir "${config.contentDir}" but directory not found`));
-//         }
-//       }
-//     }
-//   } catch (error) {
-//     // No config file or parse error - continue
-//   }
-
-//   // ========================================================================
-//   // PRIORITY 3: Check for CLI --content-dir flag
-//   // ========================================================================
-//   if (cliContentDir) {
-//     const cliContentPath = path.join(workingDir, cliContentDir);
-
-//     if (fs.existsSync(cliContentPath)) {
-//       console.log(success(`Using content directory from --content-dir flag: ${cliContentDir}/`));
-
-//       return {
-//         contentRoot: cliContentPath,
-//         mode: 'viewer'
-//       };
-//     } else {
-//       console.log(warning(`CLI flag --content-dir "${cliContentDir}" specified but directory not found`));
-//     }
-//   }
-
-//   // ========================================================================
-//   // PRIORITY 4: Check for default content/ directory
-//   // ========================================================================
-//   const defaultContentDir = path.join(workingDir, 'content');
-//   if (fs.existsSync(defaultContentDir) && fs.statSync(defaultContentDir).isDirectory()) {
-//     console.log(success('Found content/ directory'));
-
-//     return {
-//       contentRoot: defaultContentDir,
-//       mode: 'viewer'
-//     };
-//   }
-
-//   // ========================================================================
-//   // PRIORITY 5: Build skip directory list
-//   // ========================================================================
-//   let skipDirs = [...DEFAULT_SKIP_DIRS.filter(d => d !== 'templates')];
-
-//   if (cliSkipDirs) {
-//     skipDirs = [...skipDirs, ...cliSkipDirs];
-//   }
-
-//   if (config.skipDirs && Array.isArray(config.skipDirs)) {
-//     skipDirs = [...skipDirs, ...config.skipDirs];
-//   }
-
-//   skipDirs = [...new Set(skipDirs)];
-
-//   const hasSkippedDirs = skipDirs.some(dir => {
-//     const dirPath = path.join(workingDir, dir);
-//     return fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory();
-//   });
-
-//   // ========================================================================
-//   // PRIORITY 6: Check for root content files
-//   // ========================================================================
-//   try {
-//     const files = fs.readdirSync(workingDir);
-//     const contentFiles = files.filter(f => {
-//       if (shouldIgnore(f)) return false;
-//       const fullPath = path.join(workingDir, f);
-//       try {
-//         if (!fs.statSync(fullPath).isFile()) return false;
-//       } catch {
-//         return false;
-//       }
-//       return /\.(md|txt|html)$/i.test(f);
-//     });
-
-//     if (contentFiles.length > 0) {
-//       console.log(success(`Found ${contentFiles.length} content file(s) in root`));
-//       console.log(info('Using root directory as content (viewer mode)'));
-//       console.log(dim('Tip: Create content/ folder for organized projects'));
-
-//       return {
-//         contentRoot: workingDir,
-//         mode: 'viewer',
-//         rootContent: true
-//       };
-//     }
-//   } catch (error) {
-//     console.log(warning(`Could not scan root directory: ${error.message}`));
-//   }
-
-//   // ========================================================================
-//   // PRIORITY 7: No content found - needs initialization
-//   // ========================================================================
-//   if (hasSkippedDirs) {
-//     const detectedDirs = skipDirs
-//       .filter(dir => fs.existsSync(path.join(workingDir, dir)))
-//       .slice(0, 3);
-
-//     console.log(warning(`Development folders detected: ${detectedDirs.join(', ')}`));
-//     console.log(info('Content should be in content/ or set contentDir in config.json'));
-//   }
-
-//   console.log(warning('No content directory or files found'));
-//   console.log(info('Will initialize project structure'));
-
-//   return {
-//     contentRoot: defaultContentDir,
-//     mode: 'project',
-//     shouldInit: true
-//   };
-// }
-// PROPERLY CORRECTED VERSION of detectContentStructure()
-// Replace lines 862-1018 in content-processor.js with this
 
 export function detectContentStructure(workingDir, options = {}) {
   const {
@@ -1348,18 +1276,35 @@ export function buildNavigationTree(contentRoot, contentCache = new Map(), mode 
 // ============================================================================
 
 /**
- * Load all content from directory
+ * Load all content from directory using a deterministic 4-phase pipeline.
+ *
+ * PHASE 1  — Discovery (sync)
+ *   Walk the filesystem and collect file paths. No reads, no parsing.
+ *
+ * PHASE 1b — Parse + Image Collection (async, bounded concurrency)
+ *   Read markdown files concurrently via a worker-pool. Extract image
+ *   paths authoritatively using the markdown-it token tree (not regex).
+ *   Cache raw file content to avoid double reads in Phase 3.
+ *
+ * PHASE 2  — Image Dimension Warmup (async, bounded concurrency)
+ *   Read image metadata concurrently (deduplicated). Populate the
+ *   dimension cache BEFORE any rendering so width/height attributes
+ *   and responsive srcset sizes are accurate on first pass.
+ *
+ * PHASE 3  — Render (sync, deterministic)
+ *   Process all collected files with fully primed caches.
+ *   Enforce slug uniqueness. Validate broken images. Build navigation.
  */
-export function loadAllContent(options = {}) {
+export async function loadAllContent(options = {}) {
   const workingDir = process.cwd();
   const { contentRoot, mode, shouldInit } = detectContentStructure(workingDir, options);
 
-  // Shadow caches (don't mutate globals until success)
-  const newContentCache = new Map();
-  const newSlugMap = new Map();
-  const newImageReferences = new Map();
-  const newBrokenImages = [];
-  const newImageDimensionsCache = new Map();
+  // Shadow caches — never mutate globals unless pipeline succeeds
+  const newContentCache       = new Map(); // slug    → entry
+  const newSlugMap            = new Map(); // webPath → slug
+  const newImageReferences    = new Map(); // webPath → image refs
+  const newBrokenImages       = [];
+  const newImageDimensionsCache = new Map(); // absolutePath → { width, height }
 
   console.log(dim(`Content mode: ${mode}`));
   console.log(dim(`Contents root: ${contentRoot}`));
@@ -1367,175 +1312,250 @@ export function loadAllContent(options = {}) {
   if (shouldInit) {
     console.log(info('No content found, will initialize on first run'));
     return {
-      contentCache: newContentCache,
-      slugMap: newSlugMap,
-      navigation: [],
-      imageReferences: newImageReferences,
-      brokenImages: newBrokenImages,
-      imageDimensionsCache: newImageDimensionsCache,
-      mode,
-      contentRoot
+      contentCache: newContentCache, slugMap: newSlugMap, navigation: [],
+      imageReferences: newImageReferences, brokenImages: newBrokenImages,
+      imageDimensionsCache: newImageDimensionsCache, mode, contentRoot
     };
   }
 
   if (!fs.existsSync(contentRoot)) {
     console.log(warning(`Contents directory not found: ${contentRoot}`));
     return {
-      contentCache: newContentCache,
-      slugMap: newSlugMap,
-      navigation: [],
-      imageReferences: newImageReferences,
-      brokenImages: newBrokenImages,
-      imageDimensionsCache: newImageDimensionsCache,
-      mode,
-      contentRoot
+      contentCache: newContentCache, slugMap: newSlugMap, navigation: [],
+      imageReferences: newImageReferences, brokenImages: newBrokenImages,
+      imageDimensionsCache: newImageDimensionsCache, mode, contentRoot
     };
   }
 
   const siteConfig = getSiteConfig();
 
-  /**
-   * Pre-scan markdown images to get dimensions
-   */
-  async function preScanImageDimensions(content, relativePath) {
-    const imageMatches = content.matchAll(/!\[.*?\]\((.*?)\)/g);
+  // Use an injected markdown instance if available, otherwise the module-level one.
+  // This allows callers to pass a custom parser without patching this module.
+  const parser = siteConfig._markdownInstance || md;
 
-    for (const match of imageMatches) {
-      const src = match[1];
+  // CPU-aware concurrency — tuned for I/O bound tasks (2× logical cores, clamped 2–16)
+  const IO_CONCURRENCY = Math.max(2, Math.min(16, (os.cpus?.().length ?? 4) * 2));
 
-      if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('//')) {
-        continue;
-      }
-
-      let resolvedImagePath;
-      if (src.startsWith('/')) {
-        resolvedImagePath = path.join(contentRoot, src.substring(1));
-      } else if (src.startsWith('./') || src.startsWith('../')) {
-        const pageDir = path.dirname(path.join(contentRoot, relativePath));
-        resolvedImagePath = path.resolve(pageDir, src);
-      } else {
-        const pageDir = path.dirname(path.join(contentRoot, relativePath));
-        resolvedImagePath = path.resolve(pageDir, src);
-      }
-
-      if (fs.existsSync(resolvedImagePath) && !newImageDimensionsCache.has(resolvedImagePath)) {
-        try {
-          const buffer = await fs.promises.readFile(resolvedImagePath);
-          const meta = await sharp(buffer).metadata();
-          newImageDimensionsCache.set(resolvedImagePath, meta.width);
-        } catch (error) {
-          // Ignore errors
+  // ==========================================================================
+  // BOUNDED CONCURRENCY RUNNER
+  // Keeps up to `limit` workers saturated at all times.
+  // Superior to fixed batching: no idle slots while one slow task blocks a batch.
+  // ==========================================================================
+  async function runWithConcurrency(tasks, limit) {
+    if (!tasks.length) return;
+    limit = Math.max(1, Math.min(limit, tasks.length));
+    let idx = 0;
+    await Promise.all(
+      Array.from({ length: limit }, async () => {
+        while (true) {
+          const i = idx++;
+          if (i >= tasks.length) return;
+          try { await tasks[i](); } catch { /* errors logged inside tasks */ }
         }
-      }
-    }
+      })
+    );
   }
 
-  /**
-   * Recursively load content from directory
-   */
-  function loadContentFromDir(dir, relativePath = '') {
+  // ==========================================================================
+  // PARALLEL ENGINE STATE
+  // ==========================================================================
+  const filesToProcess   = []; // { fullPath, relPath, webPath, ext, cachedContent? }
+  const imagePathsToScan = new Set();
+
+  // ==========================================================================
+  // PHASE 1 — DISCOVERY (sync, fast)
+  // Collect file paths only. Zero heavy reads.
+  // ==========================================================================
+  function discoverPaths(dir, relativePath = '') {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
       if (shouldIgnore(entry.name)) continue;
 
       const fullPath = path.join(dir, entry.name);
-      const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
-      const webPath = normalizeToWebPath(relPath);
+      const relPath  = relativePath ? path.join(relativePath, entry.name) : entry.name;
+      const webPath  = normalizeToWebPath(relPath);
 
       if (entry.isDirectory() && entry.name === 'drafts') {
         console.log(dim(`Skipping drafts folder: ${webPath}`));
         continue;
       }
+      if (isInDraftsFolder(relPath)) continue;
 
-      if (isInDraftsFolder(relPath)) {
+      if (entry.isDirectory()) {
+        discoverPaths(fullPath, relPath);
         continue;
       }
 
-      if (entry.isDirectory()) {
-        loadContentFromDir(fullPath, relPath);
-      } else if (/\.(md|txt|html)$/i.test(entry.name)) {
-        if (entry.name.startsWith('_')) {
-          console.log(warning(`${webPath} uses underscore prefix (intended for template partials, not content)`));
-          console.log(dim(`Consider using drafts/ folder or draft: true in front matter`));
-        }
+      if (!/\.(md|txt|html)$/i.test(entry.name)) continue;
 
+      if (entry.name.startsWith('_')) {
+        console.log(warning(`${webPath} uses underscore prefix (intended for partials, not content)`));
+        console.log(dim(`Consider using drafts/ folder or draft: true in front matter`));
+      }
+
+      filesToProcess.push({
+        fullPath,
+        relPath,
+        webPath,
+        ext: path.extname(entry.name).toLowerCase()
+      });
+    }
+  }
+
+  // ==========================================================================
+  // PHASE 1b — PARSE + IMAGE COLLECTION (async, bounded concurrency)
+  // Read markdown files concurrently. Extract image paths via the markdown-it
+  // token tree — authoritative, handles images in blockquotes/lists/etc.
+  // Cache raw content so Phase 3 does not re-read from disk.
+  // ==========================================================================
+  async function parseFilesAndCollectImages() {
+    const tasks = filesToProcess
+      .filter(file => file.ext === '.md')
+      .map(file => async () => {
         try {
-          const ext = path.extname(entry.name).toLowerCase();
-          const isMarkdown = ext === '.md';
+          const raw = await fs.promises.readFile(file.fullPath, 'utf-8');
+          file.cachedContent = raw;
 
-          let cachedContent = null;
-          if (isMarkdown) {
-            cachedContent = fs.readFileSync(fullPath, 'utf-8');
-            const { content } = matter(cachedContent);
-            preScanImageDimensions(content, webPath);
+          const { content } = matter(raw);
+          file.cachedTokens = parser.parse(content, {});
+
+          function walkTokens(tokenList) {
+            for (const token of tokenList) {
+              if (token.type === 'image') {
+                const src = token.attrGet?.('src');
+                if (!src || /^(https?:)?\/\//.test(src)) continue;
+
+                const resolvedImagePath = src.startsWith('/')
+                  ? path.join(contentRoot, src.substring(1))
+                  : path.resolve(path.dirname(path.join(contentRoot, file.webPath)), src);
+
+                if (fs.existsSync(resolvedImagePath)) {
+                  imagePathsToScan.add(resolvedImagePath);
+                }
+              }
+              if (token.children?.length) walkTokens(token.children);
+            }
           }
 
-          // Pass the shared imageDimensionsCache to config
-          siteConfig._imageDimensionsCache = newImageDimensionsCache;
+          walkTokens(file.cachedTokens);
+        } catch (err) {
+          console.error(errorMsg(`Failed to pre-read ${file.webPath}: ${err.message}`));
+        }
+      });
 
-          const result = processContentFile(fullPath, relPath, mode, contentRoot, siteConfig, cachedContent);
+    await runWithConcurrency(tasks, IO_CONCURRENCY);
+  }
 
-          if (!result) continue;
+  // ==========================================================================
+  // PHASE 2 — IMAGE DIMENSION WARMUP (async, bounded concurrency)
+  // Deduplicated. Stores { width, height } so the renderer can emit
+  // intrinsic dimension attributes (prevents CLS) and accurate srcset sizes.
+  // ==========================================================================
+  async function warmImageCache() {
+    const tasks = Array.from(imagePathsToScan).map(resolvedImagePath => async () => {
+      if (newImageDimensionsCache.has(resolvedImagePath)) return;
+      try {
+        const meta = await sharp(resolvedImagePath).metadata();
+        if (meta?.width && meta?.height) {
+          newImageDimensionsCache.set(resolvedImagePath, { width: meta.width, height: meta.height });
+        }
+      } catch {
+        // Silently ignore unreadable / corrupted images
+      }
+    });
 
-          if (newSlugMap.has(result.slug)) {
-            const existingPath = newSlugMap.get(result.slug);
-            console.error(errorMsg(`Duplicate URL detected: ${result.entry.url}`));
-            console.log(dim(`Used in: ${webPath}`));
-            console.log(dim(`Already used in: ${existingPath}`));
+    await runWithConcurrency(tasks, IO_CONCURRENCY);
+  }
 
-            if (process.env.THYPRESS_MODE === 'dynamic') {
-              console.log(warning(`Skipping duplicate in dynamic mode: ${webPath}`));
-              continue;
-            } else {
-              console.error(errorMsg('Exiting due to duplicate URL in build mode'));
+  // ==========================================================================
+  // PHASE 3 — RENDER (sync, deterministic)
+  // Dimension cache is fully primed. Every file gets accurate image metadata.
+  // ==========================================================================
+  function processCollectedFiles() {
+    siteConfig._imageDimensionsCache = newImageDimensionsCache;
+
+    for (const file of filesToProcess) {
+      const result = processContentFile(
+        file.fullPath, file.relPath, mode, contentRoot, siteConfig, file.cachedContent, file.cachedTokens
+      );
+
+      if (!result) continue;
+
+      // Correct duplicate detection: slug → entry map (not webPath → slug)
+      if (newContentCache.has(result.slug)) {
+        const existingEntry = newContentCache.get(result.slug);
+        console.error(errorMsg(`Duplicate URL detected: ${result.entry.url}`));
+        console.log(dim(`Used in:       ${file.webPath}`));
+        console.log(dim(`Already in:    ${existingEntry.sourcePath || 'unknown'}`));
+
+        if (process.env.THYPRESS_MODE === 'dynamic') {
+          console.log(warning(`Skipping duplicate in dynamic mode: ${file.webPath}`));
+          continue;
+        } else {
+          console.error(errorMsg('Exiting due to duplicate URL in build mode'));
+          process.exit(1);
+        }
+      }
+
+      newContentCache.set(result.slug, result.entry);
+      newSlugMap.set(file.webPath, result.slug);
+
+      if (result.imageReferences?.length > 0) {
+        newImageReferences.set(file.webPath, result.imageReferences);
+
+        for (const img of result.imageReferences) {
+          if (!fs.existsSync(img.resolvedPath)) {
+            newBrokenImages.push({ post: file.webPath, src: img.src, resolvedPath: img.resolvedPath });
+
+            if (siteConfig.strictImages === true) {
+              console.error(errorMsg(`Broken image in ${file.webPath}: ${img.src}`));
+              console.log(dim(`Expected path: ${img.resolvedPath}`));
               process.exit(1);
             }
           }
-
-          newContentCache.set(result.slug, result.entry);
-          newSlugMap.set(webPath, result.slug);
-
-          if (result.imageReferences.length > 0) {
-            newImageReferences.set(webPath, result.imageReferences);
-
-            for (const img of result.imageReferences) {
-              if (!fs.existsSync(img.resolvedPath)) {
-                newBrokenImages.push({
-                  post: webPath,
-                  src: img.src,
-                  resolvedPath: img.resolvedPath
-                });
-
-                if (siteConfig.strictImages === true) {
-                  console.error(errorMsg(`Broken image in ${webPath}: ${img.src}`));
-                  console.log(dim(`Expected path: ${img.resolvedPath}`));
-                  process.exit(1);
-                }
-              }
-            }
-          }
-        } catch (error) {
-          console.error(`Error loading content '${webPath}': ${error.message}`);
         }
       }
     }
   }
 
+  // ==========================================================================
+  // EXECUTION PIPELINE (with phase timers)
+  // ==========================================================================
   try {
-    loadContentFromDir(contentRoot);
+    const totalStart = performance.now();
+
+    const p1Start = performance.now();
+    discoverPaths(contentRoot);
+    const p1End = performance.now();
+
+    const p1bStart = performance.now();
+    await parseFilesAndCollectImages();
+    const p1bEnd = performance.now();
+
+    const p2Start = performance.now();
+    await warmImageCache();
+    const p2End = performance.now();
+
+    const p3Start = performance.now();
+    processCollectedFiles();
+    const p3End = performance.now();
+
+    const totalEnd = performance.now();
+
     console.log(success(`Loaded ${newContentCache.size} entry files`));
+    console.log(dim(`  → Phase 1  (Discovery):    ${(p1End  - p1Start ).toFixed(2)}ms`));
+    console.log(dim(`  → Phase 1b (Parse+Images): ${(p1bEnd - p1bStart).toFixed(2)}ms`));
+    console.log(dim(`  → Phase 2  (Warmup):       ${(p2End  - p2Start ).toFixed(2)}ms`));
+    console.log(dim(`  → Phase 3  (Rendering):    ${(p3End  - p3Start ).toFixed(2)}ms`));
+    console.log(info(`  Total load time:           ${(totalEnd - totalStart).toFixed(2)}ms\n`));
+
   } catch (error) {
     console.error(`Error reading content directory: ${error.message}`);
     return {
-      contentCache: new Map(),
-      slugMap: new Map(),
-      navigation: [],
-      imageReferences: new Map(),
-      brokenImages: [],
-      imageDimensionsCache: new Map(),
-      mode,
-      contentRoot
+      contentCache: new Map(), slugMap: new Map(), navigation: [],
+      imageReferences: new Map(), brokenImages: [],
+      imageDimensionsCache: new Map(), mode, contentRoot
     };
   }
 

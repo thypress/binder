@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Teo Costa (THYPRESS <https://thypress.org>)
 // SPDX-License-Identifier: MPL-2.0
 
-import fs from 'fs';
-import path from 'path';
 import os from 'os';
-import crypto from 'crypto';
+import fs from 'fs';
 import zlib from 'zlib';
+import path from 'path';
+import crypto from 'crypto';
 import { promisify } from 'util';
 
 // ============================================================================
@@ -25,16 +25,10 @@ import {
 } from './renderer.js';
 
 // Content processing from content-processor.js
-import {
-  loadAllContent,
-  optimizeImage
-} from './content-processor.js';
+import { loadAllContent, optimizeImage } from './content-processor.js';
 
 // Theme functions from theme-system.js
-import {
-  loadTheme,
-  loadEmbeddedTemplates
-} from './theme-system.js';
+import { loadTheme } from './theme-system.js';
 
 // Utilities from taxonomy.js
 import {
@@ -48,9 +42,6 @@ import {
 
 // Color utilities
 import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
-
-// Template context builder
-import { buildTemplateContext } from './utils/template-context.js';
 
 // ============================================================================
 
@@ -1016,7 +1007,7 @@ export async function build() {
   console.log(bright('Building static site...\n'));
 
   // Use the robust content loader
-  const { contentCache, navigation, imageReferences, brokenImages, mode, contentRoot } = loadAllContent();
+  const { contentCache, navigation, imageReferences, brokenImages, mode, contentRoot } = await loadAllContent();
   const siteConfig = getSiteConfig();
 
   // Validate theme before building

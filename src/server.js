@@ -14,30 +14,30 @@
 //    - No watchers. No Live Reload.
 //    - Serves pre-built files from /build directory only (Nginx behavior).
 
-import fsSync from 'fs';
-import { watch } from 'fs';
+import zlib from 'zlib';
 import path from 'path';
+import fsSync, { watch } from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import zlib from 'zlib';
-import { SecurityManager } from './utils/security.js';
 
 // ============================================================================
 // CLEAN IMPORTS - Direct from source modules (no re-exports)
 // ============================================================================
 
+import { SecurityManager } from './utils/security.js';
+// Utilities from taxonomy.js
+import { getSiteConfig, normalizeToWebPath } from './utils/taxonomy.js';
+// Color utilities
+import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
+
 // Content processing from content-processor.js
 import {  loadAllContent } from './content-processor.js';
 // Theme functions from theme-system.js
 import { loadTheme } from './theme-system.js';
-// Utilities from taxonomy.js
-import { getSiteConfig, normalizeToWebPath } from './utils/taxonomy.js';
 // Rendering functions from renderer.js
 import { generateSearchIndex } from './renderer.js';
 // Build functions
 import { optimizeToCache } from './build.js';
-// Color utilities
-import { success, error as errorMsg, warning, info, dim, bright } from './utils/colors.js';
 // Cache system
 import { CacheManager, metrics } from './cache.js';
 // Routes
@@ -181,7 +181,7 @@ async function startStaticServer() {
   console.log(dim(`• Live reload: disabled (static mode)`));
   console.log(dim(`• Caching: enabled (simulating production)`));
 
-  Bun.serve({
+  const serverInstance = Bun.serve({
     port,
     async fetch(req) {
       const url = new URL(req.url);
@@ -264,6 +264,12 @@ async function startDynamicServer() {
   // Security state
   const securityManager = new SecurityManager(siteConfig);
 
+  // Watcher lifecycle — stored so we can close them on re-initialization
+  let contentWatcher = null;
+  let templateWatcher = null;
+  let configWatcher = null;
+  let redirectsWatcher = null;
+
   // ============================================================================
   // INTERNAL UTILITY FUNCTIONS
   // ============================================================================
@@ -342,9 +348,11 @@ async function startDynamicServer() {
   // ============================================================================
 
   /**
-   * Schedule a full content reload with debouncing and locking
-   */
-  function scheduleFullReload() {
+  * Schedule a full content reload with debouncing and locking.
+  * @param {string|null} newWorkingDir - If provided, chdir to this path before reloading.
+  *                                      Also restarts file watchers for the new location.
+  */
+  function scheduleFullReload(newWorkingDir = null) {
     clearTimeout(pendingReload);
     pendingReload = setTimeout(async () => {
       if (reloadLock) {
@@ -355,7 +363,15 @@ async function startDynamicServer() {
       reloadLock = true;
       try {
         console.log(info('Reloading all content...'));
-        const result = loadAllContent();
+
+        if (newWorkingDir) {
+          console.log(info(`Changing working directory to: ${newWorkingDir}`));
+          process.chdir(newWorkingDir);
+          siteConfig = getSiteConfig();
+          await reloadTheme();
+        }
+
+        const result = await loadAllContent();
 
         // Atomic swap of all state
         contentCache = result.contentCache;
@@ -364,13 +380,19 @@ async function startDynamicServer() {
         imageReferences = result.imageReferences;
         brokenImages = result.brokenImages;
         contentMode = result.mode;
+        contentRoot = result.contentRoot;
 
         cacheManager.renderedCache.clear();
         cacheManager.dynamicContentCache.clear();
 
-        // Re-warm if enabled
+        // Re-warm
         await preRenderAllContent();
         await preCompressContent();
+
+        if (newWorkingDir) {
+          // Restart watchers pointing at new directories
+          setupWatchers();
+        }
 
         broadcastReload();
         console.log(success('Content reloaded'));
@@ -379,7 +401,7 @@ async function startDynamicServer() {
       } finally {
         reloadLock = false;
       }
-    }, 500); // 500ms debounce
+    }, 500);
   }
 
   /**
@@ -417,7 +439,8 @@ async function startDynamicServer() {
 
     console.log(info('Pre-rendering all pages (warmup)...'));
 
-    const startTime = Date.now();
+    // USE performance.now() for sub-millisecond precision
+    const startTime = performance.now();
     let successCount = 0;
     let errorCount = 0;
 
@@ -497,13 +520,17 @@ async function startDynamicServer() {
       }
     }
 
-    const elapsed = Date.now() - startTime;
+    const totalEnd = performance.now();
+    const elapsed = totalEnd - startTime;
 
     if (errorCount > 0) {
       console.log(warning(`Pre-render completed with ${errorCount} errors`));
     }
 
-    console.log(success(`Pre-rendered ${successCount} pages in ${elapsed}ms (${(elapsed / successCount).toFixed(1)}ms avg)`));
+    // Guard against division by zero and format for sub-ms readability
+    const avg = successCount > 0 ? (elapsed / successCount).toFixed(2) : '0.00';
+
+    console.log(success(`Pre-rendered ${successCount} pages in ${elapsed.toFixed(2)}ms (${avg}ms avg)`));
   }
 
   /**
@@ -650,12 +677,94 @@ async function startDynamicServer() {
   // }
 
   // ============================================================================
+  // WATCHER LIFECYCLE MANAGEMENT
+  // ============================================================================
+
+  /**
+    * Set up (or re-set up) all file watchers.
+    * Closes existing watchers before creating new ones so that after a
+    * process.chdir() to a new project directory, we watch the new paths.
+    */
+  function setupWatchers() {
+    // Close existing watchers
+    if (contentWatcher)   { try { contentWatcher.close();   } catch {} contentWatcher   = null; }
+    if (templateWatcher)  { try { templateWatcher.close();  } catch {} templateWatcher  = null; }
+    if (configWatcher)    { try { configWatcher.close();    } catch {} configWatcher    = null; }
+    if (redirectsWatcher) { try { redirectsWatcher.close(); } catch {} redirectsWatcher = null; }
+
+    // Content watcher
+    try {
+      if (fsSync.existsSync(contentRoot)) {
+        contentWatcher = watch(contentRoot, { recursive: true }, async (event, filename) => {
+          if (!filename) return;
+          if (shouldIgnore(path.basename(filename))) return;
+          if (isInDraftsFolder(filename)) return;
+
+          const webPath = normalizeToWebPath(filename);
+
+          try {
+            if (/\.(md|txt|html)$/i.test(webPath)) {
+              console.log(info(`Content: ${event} - ${path.basename(filename)}`));
+              scheduleFullReload();
+            }
+            if (/\.(jpg|jpeg|png|webp|avif|gif)$/i.test(filename)) {
+              console.log(info(`Images: ${event} - ${path.basename(filename)}`));
+              scheduleImageOptimization();
+            }
+          } catch (error) {
+            console.error(errorMsg(`Error processing change: ${error.message}`));
+          }
+        });
+        console.log(success(`Watching ${contentRoot} for changes`));
+      }
+    } catch (error) {
+      console.error(errorMsg(`Could not watch content directory: ${error.message}`));
+    }
+
+    // Templates watcher
+    try {
+      const themesDir = path.join(process.cwd(), 'templates');
+      if (fsSync.existsSync(themesDir)) {
+        templateWatcher = watch(themesDir, { recursive: true }, async (event, filename) => {
+          if (!filename) return;
+          if (shouldIgnore(path.basename(filename))) return;
+          console.log(info(`Theme: ${event} - ${filename}`));
+          await reloadTheme();
+        });
+        console.log(success('Watching templates/ for changes'));
+      }
+    } catch (error) {}
+
+    // Config watcher
+    try {
+      const configPath = path.join(process.cwd(), 'config.json');
+      if (fsSync.existsSync(configPath)) {
+        configWatcher = watch(configPath, async () => {
+          siteConfig = getSiteConfig();
+          await reloadTheme();
+          invalidateDynamicCaches();
+          console.log(success('Config reloaded'));
+          broadcastReload();
+        });
+      }
+
+      const redirectsPath = path.join(process.cwd(), 'redirects.json');
+      if (fsSync.existsSync(redirectsPath)) {
+        redirectsWatcher = watch(redirectsPath, () => {
+          loadRedirects();
+          console.log(success('Redirects reloaded'));
+        });
+      }
+    } catch (error) {}
+  }
+
+  // ============================================================================
   // INITIALIZATION SEQUENCE
   // ============================================================================
 
   console.log(bright('Initializing Dynamic Engine...\n'));
 
-  const initialLoad = loadAllContent();
+  const initialLoad = await loadAllContent();
   contentCache = initialLoad.contentCache;
   slugMap = initialLoad.slugMap;
   navigation = initialLoad.navigation;
@@ -681,17 +790,20 @@ async function startDynamicServer() {
     process.exit(1);
   }
 
+  // if (!templatesCache.has('entry')) { // The less strict new mode does not require 'entry' template
+  //   console.log('');
+  //   console.error(errorMsg('FATAL: Missing required template: entry.html'));
+  //   console.log('');
+  //   console.log(info('The active theme must provide entry.html'));
+  //   console.log(dim('Fix:'));
+  //   console.log(dim('1. Add entry.html to your theme'));
+  //   console.log(dim('2. Switch theme in config.json'));
+  //   console.log(dim('3. Set theme: ".default" to use embedded theme'));
+  //   console.log('');
+  //   process.exit(1);
+  // }
   if (!templatesCache.has('entry')) {
-    console.log('');
-    console.error(errorMsg('FATAL: Missing required template: entry.html'));
-    console.log('');
-    console.log(info('The active theme must provide entry.html'));
-    console.log(dim('Fix:'));
-    console.log(dim('1. Add entry.html to your theme'));
-    console.log(dim('2. Switch theme in config.json'));
-    console.log(dim('3. Set theme: ".default" to use embedded theme'));
-    console.log('');
-    process.exit(1);
+    console.log(warning('No entry.html found in active theme — single-file mode assumed, entry pages will use index template'));
   }
 
   console.log(success('✓ Theme validation passed'));
@@ -713,71 +825,10 @@ async function startDynamicServer() {
   await preCompressContent();
 
   // ============================================================================
-  // FILE WATCHING
+  // FILE WATCHING — initial setup (after first content load)
   // ============================================================================
 
-  try {
-    watch(contentRoot, { recursive: true }, async (event, filename) => {
-      if (!filename) return;
-
-      if (shouldIgnore(path.basename(filename))) return;
-
-      if (isInDraftsFolder(filename)) return;
-
-      const webPath = normalizeToWebPath(filename);
-
-      try {
-        if (/\.(md|txt|html)$/i.test(webPath)) {
-          console.log(info(`Content: ${event} - ${path.basename(filename)}`));
-          scheduleFullReload();
-        }
-
-        if (/\.(jpg|jpeg|png|webp|avif|gif)$/i.test(filename)) {
-          console.log(info(`Images: ${event} - ${path.basename(filename)}`));
-          scheduleImageOptimization();
-        }
-      } catch (error) {
-        console.error(errorMsg(`Error processing change: ${error.message}`));
-      }
-    });
-    console.log(success(`Watching ${contentRoot} for changes`));
-  } catch (error) {
-    console.error(errorMsg(`Could not watch content directory: ${error.message}`));
-  }
-
-  try {
-    const themesDir = path.join(process.cwd(), 'templates');
-    if (fsSync.existsSync(themesDir)) {
-      watch(themesDir, { recursive: true }, async (event, filename) => {
-        if (!filename) return;
-        if (shouldIgnore(path.basename(filename))) return;
-        console.log(info(`Theme: ${event} - ${filename}`));
-        await reloadTheme();
-      });
-      console.log(success('Watching templates/ for changes'));
-    }
-  } catch (error) {}
-
-  try {
-    const configPath = path.join(process.cwd(), 'config.json');
-    if (fsSync.existsSync(configPath)) {
-      watch(configPath, async (event, filename) => {
-        siteConfig = getSiteConfig();
-        await reloadTheme();
-        invalidateDynamicCaches();
-        console.log(success('Config reloaded'));
-        broadcastReload();
-      });
-    }
-
-    const redirectsPath = path.join(process.cwd(), 'redirects.json');
-    if (fsSync.existsSync(redirectsPath)) {
-      watch(redirectsPath, async (event, filename) => {
-        loadRedirects();
-        console.log(success('Redirects reloaded'));
-      });
-    }
-  } catch (error) {}
+  setupWatchers();
 
   // ============================================================================
   // SERVER & METRICS
@@ -815,7 +866,7 @@ async function startDynamicServer() {
     }
   }
 
-  Bun.serve({
+  const serverInstance = Bun.serve({
     port,
     idleTimeout: process.env.THYPRESS_IDLE_TIMEOUT
       ? parseInt(process.env.THYPRESS_IDLE_TIMEOUT)
@@ -865,8 +916,9 @@ async function startDynamicServer() {
           metrics,
           preRenderAllContent,
           preCompressContent,
-          securityManager, // Pass security manager to routes
-          bunServer: server // Pass Bun server instance so admin-routes.js can call getClientIP correctly
+          scheduleFullReload, // Allows admin-routes to trigger re-init
+          securityManager,    // Pass security manager to routes
+          bunServer: server   // Pass Bun server instance so admin-routes.js can call getClientIP correctly
         };
 
         return await handleRequest(request, server, deps);
@@ -879,6 +931,10 @@ async function startDynamicServer() {
       }
     }
   });
+
+  if (typeof serverInstance.requestIP !== 'function') {
+    console.error(errorMsg('[SECURITY] CRITICAL: Bun server instance lacks requestIP(). All local-only features (open-folder, create-project, upload-theme) will be disabled. Upgrade Bun.'));
+  }
 
   const serverUrl = `http://localhost:${port}`;
 
@@ -895,7 +951,19 @@ async function startDynamicServer() {
   const shouldOpenBrowser = process.env.THYPRESS_OPEN_BROWSER === 'true';
   if (shouldOpenBrowser) {
     console.log(info('Opening browser...\n'));
-    openBrowser(serverUrl); // Opens site homepage — admin link is printed to console above
+
+    const isWelcomeMode = process.env.THYPRESS_INTENT_MODE === 'welcome';
+    const isFirstRun    = securityManager.pin === null;
+
+    if (isWelcomeMode || isFirstRun) {
+      // Open admin directly — user needs onboarding, not the empty public homepage.
+      // Generate a SECOND magic token (the first was printed to the CLI above).
+      const browserToken   = securityManager.generateMagicToken();
+      const browserAdminUrl = `${serverUrl}/__thypress_${securityManager.adminSecret}/?token=${browserToken}`;
+      openBrowser(browserAdminUrl);
+    } else {
+      openBrowser(serverUrl);
+    }
   }
 
   setupGracefulShutdown({ liveReloadClients });

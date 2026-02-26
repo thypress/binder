@@ -4,9 +4,14 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
 import matter from 'gray-matter';
 import Handlebars from 'handlebars';
+
+import { slugify } from './utils/taxonomy.js';
+import { registerHelpers } from './utils/theme-helpers.js';
 import { success, error as errorMsg, warning, info, dim } from './utils/colors.js';
+
 import { DEFAULT_THEME_ID, EMBEDDED_TEMPLATES as STATIC_EMBEDDED_TEMPLATES } from './embedded-templates.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -15,8 +20,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 // HANDLEBARS HELPERS
 // ============================================================================
 
-Handlebars.registerHelper('eq', (a, b) => a === b);
-Handlebars.registerHelper('split', (str, sep, index) => String(str).split(sep)[index]);
+registerHelpers(Handlebars, slugify);
 
 // ============================================================================
 // TEMPLATE VALIDATION
@@ -26,7 +30,7 @@ Handlebars.registerHelper('split', (str, sep, index) => String(str).split(sep)[i
  * Validates a Handlebars template string for syntax errors.
  * @param {string} templateString - The raw template string.
  * @param {string} filePath - Optional filename for better error messages.
- * @returns {boolean} - True if valid, False if invalid.
+ * @returns {boolean} True if valid, false if invalid.
  */
 export function validateTemplate(templateString, filePath = 'unknown file') {
   try {
@@ -144,23 +148,129 @@ export const THYPRESS_FEATURES = {
 };
 
 // ============================================================================
-// UTILITY FUNCTIONS
+// PAGE TYPE ROUTING CONSTANTS
 // ============================================================================
 
-function shouldIgnore(name) {
-  return name.startsWith('.');
-}
+/**
+ * All canonical page type keys THYPRESS understands.
+ *
+ * Theme authors can remap ANY of these to their own filename choices via the
+ * `templates` object in theme.json. This is the ONLY supported mechanism for
+ * mapping canonical types to custom template filenames — there is no automatic
+ * fallback cascade. Every mapping must be explicit.
+ *
+ * Example theme.json routing map:
+ *
+ *   {
+ *     "templates": {
+ *       "entry":    "post",
+ *       "tag":      "archive",
+ *       "category": "archive",
+ *       "series":   "archive",
+ *       "404":      "error"
+ *     }
+ *   }
+ *
+ * Rules:
+ *   - `index` is the only hard requirement (by filename or via the routing map).
+ *   - Any canonical type not covered by a template file OR a routing map entry
+ *     will fall back to whatever the .default embedded layer loaded for that
+ *     type. This is intentional and visible — theme authors must be explicit
+ *     if they want to override all types.
+ *   - Single-file themes should use `singleFile: true` or `handles: [...]`
+ *     instead of the routing map (see single-file detection in loadTheme).
+ */
+const KNOWN_PAGE_TYPES = ['index', 'entry', 'page', 'tag', 'category', 'series', '404'];
 
-function compareVersions(a, b) {
-  const aParts = a.split('.').map(Number);
-  const bParts = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    const aVal = aParts[i] || 0;
-    const bVal = bParts[i] || 0;
-    if (aVal > bVal) return 1;
-    if (aVal < bVal) return -1;
+// ============================================================================
+// SINGLE-FILE HEURISTICS — Layer 4, last-resort auto-detection
+// ============================================================================
+
+/**
+ * Scan a Handlebars template source for THYPRESS-specific variable usage to
+ * infer which page types the template handles. This only runs when:
+ *   - `singleFile: true` is NOT declared
+ *   - `handles: [...]` is NOT declared
+ *   - The auto-diff cannot conclusively determine single-file nature
+ *   - The active theme has `index` but not `entry` in its contributed set
+ *
+ * Patterns checked for each type:
+ *   {{#if entry}} / {{entry.x}}           → 'entry', 'page'
+ *   {{#if tag}} / {{tag}}                 → 'tag'
+ *   {{#if category}} / {{category}}       → 'category'
+ *   {{#if series}} / {{series}}           → 'series'
+ *   (eq pageType "xxx")                   → the named type
+ *   {{#*inline "xxx"}}                    → the named type
+ *   {{#each entries}}                     → 'tag', 'category', 'series' (list types)
+ *
+ * @param   {string}    source  Raw template content (front-matter already stripped)
+ * @returns {Set<string>}       Detected canonical page types (always includes 'index')
+ */
+function detectPageTypesFromSource(source) {
+  const detected = new Set(['index']);
+
+  // entry / page (treated as synonymous for heuristic purposes)
+  if (
+    /\{\{#if\s+entry[\s}]/.test(source)                  ||
+    /\{\{entry\./.test(source)                            ||
+    /\(eq\s+pageType\s+['"]entry['"]\)/.test(source)     ||
+    /\{\{#\*inline\s+["']entry["']\}\}/.test(source)
+  ) {
+    detected.add('entry');
+    detected.add('page');
   }
-  return 0;
+
+  // tag
+  if (
+    /\{\{#if\s+tag[\s}]/.test(source)                    ||
+    /\{\{tag\}\}/.test(source)                            ||
+    /\(eq\s+pageType\s+['"]tag['"]\)/.test(source)       ||
+    /\{\{#\*inline\s+["']tag["']\}\}/.test(source)
+  ) {
+    detected.add('tag');
+  }
+
+  // category
+  if (
+    /\{\{#if\s+category[\s}]/.test(source)               ||
+    /\{\{category\}\}/.test(source)                       ||
+    /\(eq\s+pageType\s+['"]category['"]\)/.test(source)  ||
+    /\{\{#\*inline\s+["']category["']\}\}/.test(source)
+  ) {
+    detected.add('category');
+  }
+
+  // series
+  if (
+    /\{\{#if\s+series[\s}]/.test(source)                 ||
+    /\{\{series\}\}/.test(source)                         ||
+    /\(eq\s+pageType\s+['"]series['"]\)/.test(source)    ||
+    /\{\{#\*inline\s+["']series["']\}\}/.test(source)
+  ) {
+    detected.add('series');
+  }
+
+  // 404
+  if (
+    /\(eq\s+pageType\s+['"]404['"]\)/.test(source)       ||
+    /\{\{#\*inline\s+["']404["']\}\}/.test(source)
+  ) {
+    detected.add('404');
+  }
+
+  // Generic list view — {{#each entries}} or {{#if entries}} implies the
+  // template renders listing pages (tag/category/series), even without an
+  // explicit {{#if tag}} block.
+  if (
+    /\{\{#each\s+entries[\s}]/.test(source)              ||
+    /\{\{#if\s+entries[\s}]/.test(source)
+  ) {
+    detected.add('tag');
+    detected.add('category');
+    detected.add('series');
+  }
+
+  return detected;
 }
 
 // ============================================================================
@@ -168,7 +278,7 @@ function compareVersions(a, b) {
 // ============================================================================
 
 /**
- * Validate theme requirements against THYPRESS runtime
+ * Validate theme requirements against THYPRESS runtime version.
  */
 export function validateThemeRequirements(themeMetadata, thypressVersion) {
   const warnings = [];
@@ -202,9 +312,15 @@ export function validateThemeRequirements(themeMetadata, thypressVersion) {
 }
 
 /**
- * Validate theme structure and completeness
+ * Validate theme structure and completeness.
+ * Only `index` is required. All other templates are optional.
+ *
+ * Emits a diagnostic warning for any canonical page type that is not covered
+ * by the active theme (neither a template file nor a routing map entry).
+ * These types will silently render with the .default fallback layer, which
+ * is correct behaviour but should be visible to theme authors.
  */
-export function validateTheme(themePath, templatesCache, themeName, themeMetadata = {}) {
+export function validateTheme(themePath, templatesCache, themeName, themeMetadata = {}, activeThemeContributed = new Set()) {
   const errors = [];
   const warnings = [];
   const packageJson = JSON.parse(
@@ -212,12 +328,27 @@ export function validateTheme(themePath, templatesCache, themeName, themeMetadat
   );
   const thypressVersion = packageJson.version;
 
-  // Only index.html is required
+  // Only index.html is strictly required — everything else is optional and
+  // must be resolved explicitly via template files or the routing map.
   if (!templatesCache.has('index')) {
     errors.push(`Missing required template: index.html`);
   }
 
-  // Scan templates for partial references
+  // Warn about any canonical type not covered by the active theme.
+  // These will fall back to .default visuals, which is intentional but
+  // should be surfaced so authors know what they are not overriding.
+  const uncoveredTypes = KNOWN_PAGE_TYPES.filter(
+    t => t !== 'index' && !activeThemeContributed.has(t)
+  );
+  if (uncoveredTypes.length > 0 && activeThemeContributed.size > 0) {
+    warnings.push(
+      `Theme "${themeName}" does not explicitly handle: [${uncoveredTypes.join(', ')}]. ` +
+      `These page types will render with the .default fallback layer. ` +
+      `To override them, add template files or declare them in the "templates" routing map in theme.json.`
+    );
+  }
+
+  // Scan all theme templates for partial references and verify they exist.
   const requiredPartials = new Set();
   const availablePartials = new Set();
 
@@ -289,6 +420,22 @@ export function validateTheme(themePath, templatesCache, themeName, themeMetadat
 
 // Module-level flag for dev mode logging (log once per process)
 let hasLoggedDevMode = false;
+
+function shouldIgnore(name) {
+  return name.startsWith('.');
+}
+
+function compareVersions(a, b) {
+  const aParts = a.split('.').map(Number);
+  const bParts = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const aVal = aParts[i] || 0;
+    const bVal = bParts[i] || 0;
+    if (aVal > bVal) return 1;
+    if (aVal < bVal) return -1;
+  }
+  return 0;
+}
 
 /**
  * Compile a Handlebars template string to a callable function.
@@ -480,12 +627,19 @@ export async function loadEmbeddedTemplates(themeId = DEFAULT_THEME_ID) {
  *
  * Front-matter is stripped from HTML files before compilation.
  *
+ * Returns a Set of template names (not partials, not assets) that this layer
+ * wrote into templatesCache. The caller uses this to track what the active
+ * theme explicitly contributes (Layer 1/.default contributions are intentionally
+ * NOT tracked).
+ *
  * @param {string} themeId
  * @param {Map}    templatesCache
  * @param {Map}    themeAssets
+ * @returns {Set<string>} contributed template names
  */
 async function _loadEmbeddedThemeLayer(themeId, templatesCache, themeAssets) {
   const files = await loadEmbeddedTemplates(themeId);
+  const contributed = new Set();
   let templatesLoaded = 0;
   let partialsLoaded = 0;
   let assetsLoaded = 0;
@@ -515,6 +669,7 @@ async function _loadEmbeddedThemeLayer(themeId, templatesCache, themeAssets) {
         const compiled = compileTemplate(templateName, templateContent);
         if (compiled) {
           templatesCache.set(templateName, compiled);
+          contributed.add(templateName);
           templatesLoaded++;
         }
       }
@@ -553,6 +708,8 @@ async function _loadEmbeddedThemeLayer(themeId, templatesCache, themeAssets) {
     `Embedded layer "${themeId}": ` +
     `${templatesLoaded} templates, ${partialsLoaded} partials, ${assetsLoaded} assets`
   ));
+
+  return contributed;
 }
 
 /**
@@ -561,20 +718,27 @@ async function _loadEmbeddedThemeLayer(themeId, templatesCache, themeAssets) {
  * Processing order:
  *   1. Scan partials/ folder → register all .html files as Handlebars partials
  *   2. Recursively walk theme root (skip partials/):
- *      - _underscore.html        → partial
+ *      - _underscore.html          → partial
  *      - partial: true front-matter → partial
- *      - any other .html         → validated & compiled page template
- *      - non-HTML                → template asset (if contains {{) or static asset
+ *      - any other .html           → validated & compiled page template
+ *      - non-HTML                  → template asset (if contains {{) or static asset
  *
  * Templates overwrite any previously loaded template with the same name (last wins).
  *
+ * Returns a Set of template names (not partials, not assets) that this layer
+ * wrote into templatesCache. The caller uses this to track what the active
+ * theme explicitly contributes.
+ *
  * @param {string} themePath
- * @param {string} themeName    - For logging
+ * @param {string} themeName     - For logging
  * @param {Map}    templatesCache
  * @param {Map}    themeAssets
- * @param {Object} siteConfig   - Used for strictTemplateValidation
+ * @param {Object} siteConfig    - Used for strictTemplateValidation
+ * @returns {Set<string>} contributed template names
  */
 function _loadDiskThemeLayer(themePath, themeName, templatesCache, themeAssets, siteConfig) {
+  const contributed = new Set();
+
   // --- Step 1: partials/ folder ---
   const partialsDir = path.join(themePath, 'partials');
   if (fs.existsSync(partialsDir)) {
@@ -660,6 +824,7 @@ function _loadDiskThemeLayer(themePath, themeName, templatesCache, themeAssets, 
               const compiled = compileTemplate(templateName, templateContent);
               if (compiled) {
                 templatesCache.set(templateName, compiled);
+                contributed.add(templateName);
                 console.log(dim(`Loaded template: ${templateName}`));
               }
             }
@@ -683,6 +848,7 @@ function _loadDiskThemeLayer(themePath, themeName, templatesCache, themeAssets, 
   }
 
   loadThemeFiles(themePath);
+  return contributed;
 }
 
 // ============================================================================
@@ -705,9 +871,9 @@ function detectPreviewImage(themeDir) {
 /**
  * Scan and return all available themes with their type classification:
  *
- *   'embedded'  — exists only in EMBEDDED_TEMPLATES registry
- *   'local'     — exists only on disk in templates/
- *   'overridden'— same ID exists in both registry AND on disk
+ *   'embedded'   — exists only in EMBEDDED_TEMPLATES registry
+ *   'local'      — exists only on disk in templates/
+ *   'overridden' — same ID exists in both registry AND on disk
  *
  * @returns {Array<Object>} Theme descriptor objects
  */
@@ -904,9 +1070,71 @@ export function setActiveTheme(themeId) {
 }
 
 // ============================================================================
-// THEME LOADER — 3-Layer Inheritance Chain (ROBUST VERSION)
+// THEME LOADER — 3-Layer Inheritance + Template Routing + Single-File Detection
 // ============================================================================
 
+/**
+ * Load and resolve all theme layers into a unified templatesCache + themeAssets.
+ *
+ * Resolution pipeline:
+ *
+ *   Layer 1 — Fallback embedded  (config.defaultTheme || DEFAULT_THEME_ID)
+ *             Always loaded unless strictThemeIsolation: true. Provides the
+ *             complete safety-net skeleton. Its contributions are intentionally
+ *             NOT tracked in activeThemeContributed.
+ *
+ *   Layer 2 — Active embedded    (config.theme, only if key exists in EMBEDDED_TEMPLATES)
+ *             Skipped when: activeTheme === fallbackId, or not in registry.
+ *
+ *   Layer 3 — Active disk        (templates/<config.theme>/, if directory exists on disk)
+ *             Works for any theme name. Last write wins for any given template key.
+ *
+ *   Step 4  — Template routing map  (themeMetadata.templates object)
+ *             The ONLY supported mechanism for aliasing canonical THYPRESS type
+ *             names to the theme author's chosen filenames, or for pointing
+ *             multiple canonical types at the same compiled template.
+ *             All mappings are explicit — there is no automatic cascade.
+ *
+ *             Declared in theme.json (or index.html front-matter):
+ *               {
+ *                 "templates": {
+ *                   "entry":    "post",
+ *                   "tag":      "archive",
+ *                   "category": "archive",
+ *                   "series":   "archive",
+ *                   "404":      "error"
+ *                 }
+ *               }
+ *
+ *             Authors can extend this with any key — canonical THYPRESS types
+ *             (entry, tag, category, series, 404) OR fully custom template names
+ *             (e.g. "docs" → "documentation") for section-specific rendering.
+ *             The value must match a basename of a file already loaded by
+ *             Layers 2 or 3. Unknown aliases are skipped with a warning.
+ *
+ *   Step 5  — Single-file detection (4-layer cascade)
+ *             Determines if the active theme intends index to serve multiple
+ *             page types and maps it accordingly. Layers in priority order:
+ *               5a. Explicit `singleFile: true` in metadata
+ *               5b. `handles: [...]` array — map only the listed types
+ *               5c. Auto-diff — active theme contributed only 'index'
+ *               5d. Regex heuristics — scan index source for THYPRESS variables
+ *
+ *   No automatic fallback cascade — any canonical page type not covered by the
+ *   active theme after Steps 4–5 will render with the .default fallback layer
+ *   loaded in Layer 1. This is intentional and a diagnostic warning is emitted
+ *   so theme authors know exactly which types they are not overriding.
+ *
+ * @param {string|null} themeName  - Value of config.theme (null = use fallback only)
+ * @param {Object}      siteConfig - Full site configuration object
+ * @returns {Promise<{
+ *   templatesCache: Map,
+ *   themeAssets:    Map,
+ *   activeTheme:    string,
+ *   validation:     { valid: boolean, errors: string[], warnings: string[] },
+ *   themeMetadata:  Object
+ * }>}
+ */
 export async function loadTheme(themeName = null, siteConfig = {}) {
   const templatesDir = path.join(process.cwd(), 'templates');
   const templatesCache = new Map();
@@ -914,6 +1142,14 @@ export async function loadTheme(themeName = null, siteConfig = {}) {
 
   let activeTheme = themeName;
   let themeMetadata = {};
+  let themePath = null;
+  let validation = { valid: true, errors: [], warnings: [] };
+
+  // Tracks template names (not partials, not assets) contributed by Layers 2+3
+  // (the active theme only). This is the authoritative signal for single-file
+  // detection and routing map resolution. Layer 1 is intentionally excluded
+  // because it is the fallback safety net, not the active theme's own output.
+  const activeThemeContributed = new Set();
 
   // ==========================================================================
   // STEP 0: Clean slate
@@ -922,13 +1158,14 @@ export async function loadTheme(themeName = null, siteConfig = {}) {
   _clearAllHandlebarsPartials();
 
   // ==========================================================================
-  // STEP 1: Fallback (safety-net) embedded layer
-  // Skipped when strictThemeIsolation=true — theme must be fully self-sufficient
+  // STEP 1: Fallback (safety-net) embedded layer — ALWAYS loaded
+  // Skipped when strictThemeIsolation: true
   // ==========================================================================
   const fallbackId = siteConfig.defaultTheme || DEFAULT_THEME_ID;
   if (siteConfig.strictThemeIsolation !== true) {
     console.log(info(`Layer 1 (fallback): ${fallbackId}`));
     await _loadEmbeddedThemeLayer(fallbackId, templatesCache, themeAssets);
+    // NOTE: Layer 1 contributions NOT tracked in activeThemeContributed.
   } else {
     console.log(info(`Layer 1 (fallback): skipped (strictThemeIsolation)`));
   }
@@ -945,16 +1182,14 @@ export async function loadTheme(themeName = null, siteConfig = {}) {
 
   if (isActiveEmbedded) {
     console.log(info(`Layer 2 (embedded active): ${activeTheme}`));
-    await _loadEmbeddedThemeLayer(activeTheme, templatesCache, themeAssets);
+    const embeddedContrib = await _loadEmbeddedThemeLayer(activeTheme, templatesCache, themeAssets);
+    for (const k of embeddedContrib) activeThemeContributed.add(k);
     themeMetadata = _loadEmbeddedThemeMetadata(activeTheme);
   }
 
   // ==========================================================================
   // STEP 3: Active disk layer
   // ==========================================================================
-  let themePath = null;
-  let validation = { valid: true, errors: [], warnings: [] };
-
   if (activeTheme) {
     const candidatePath = path.join(templatesDir, activeTheme);
 
@@ -968,10 +1203,11 @@ export async function loadTheme(themeName = null, siteConfig = {}) {
         themeMetadata = { ...themeMetadata, ...diskMeta };
       }
 
-      _loadDiskThemeLayer(themePath, activeTheme, templatesCache, themeAssets, siteConfig);
+      const diskContrib = _loadDiskThemeLayer(themePath, activeTheme, templatesCache, themeAssets, siteConfig);
+      for (const k of diskContrib) activeThemeContributed.add(k);
 
       if (activeTheme !== DEFAULT_THEME_ID) {
-        validation = validateTheme(themePath, templatesCache, activeTheme, themeMetadata);
+        validation = validateTheme(themePath, templatesCache, activeTheme, themeMetadata, activeThemeContributed);
       }
     } else if (!isActiveEmbedded && activeTheme !== fallbackId) {
       console.log(warning(`Theme "${activeTheme}" not found on disk or in embedded registry`));
@@ -980,32 +1216,144 @@ export async function loadTheme(themeName = null, siteConfig = {}) {
   }
 
   // ==========================================================================
-  // SINGLE-FILE LOGIC (Explicit & Deterministic)
+  // STEP 4: Template routing map
+  //
+  // The ONLY mechanism for mapping canonical page types to custom filenames,
+  // or for pointing multiple canonical types at a single shared template.
+  // Every mapping is explicit — nothing is inferred or cascaded automatically.
+  //
+  // How it works:
+  //   - The value is a loaded template basename (WITHOUT .html extension).
+  //   - The target must have been loaded by Layers 2 or 3 to be valid.
+  //   - Any canonical THYPRESS type OR a custom section name can be a key.
+  //   - Unknown alias targets are skipped with a warning (no silent failures).
+  //   - Routing map entries are added to activeThemeContributed so single-file
+  //     detection (Step 5) treats them as explicit active-theme output.
+  //
+  // Example theme.json:
+  //   {
+  //     "templates": {
+  //       "entry":    "post",       ← canonical type remapped to post.html
+  //       "tag":      "archive",    ← canonical type remapped to archive.html
+  //       "category": "archive",    ← shares archive.html with tag
+  //       "series":   "archive",    ← shares archive.html with tag + category
+  //       "404":      "error",      ← canonical type remapped to error.html
+  //       "docs":     "docs-layout" ← custom section template (non-canonical)
+  //     }
+  //   }
   // ==========================================================================
-  // Trust Metadata > Explicit Structure > Magic.
-  if (!templatesCache.has('entry') && templatesCache.has('index')) {
-      const indexTpl = templatesCache.get('index');
-
-      // 1. Basic Mapping (Safe)
-      // Index always handles 'page' (static pages) and 'entry' (posts) in a single-file theme.
-      if (themeMetadata.singleFile === true || (!themePath && !isActiveEmbedded)) {
-          templatesCache.set('entry', indexTpl);
-          templatesCache.set('page', indexTpl);
-
-          // 2. Explicit Capabilities (Advanced)
-          // If the theme author explicitly says "I handle tags", we believe them.
-          if (themeMetadata.handles && Array.isArray(themeMetadata.handles)) {
-              themeMetadata.handles.forEach(type => {
-                  templatesCache.set(type, indexTpl);
-              });
-              console.log(success(`Single-file handles explicitly: ${themeMetadata.handles.join(', ')}`));
-          } else {
-              // 3. The "Safe Fallback"
-              // We do NOT automatically map complex views like 'tag', 'category', etc.
-              // It is safer to let Layer 1 (System Fallback) handle those.
-              console.log(dim(`Single-file mode: Mapped 'entry' and 'page' to index.`));
-          }
+  if (themeMetadata.templates && typeof themeMetadata.templates === 'object') {
+    console.log(info('Applying template routing map...'));
+    for (const [canonical, alias] of Object.entries(themeMetadata.templates)) {
+      if (typeof alias !== 'string' || alias.trim() === '') {
+        console.log(warning(`Template routing: skipping "${canonical}" — alias must be a non-empty string`));
+        continue;
       }
+
+      const aliasedTemplate = templatesCache.get(alias);
+      if (aliasedTemplate) {
+        templatesCache.set(canonical, aliasedTemplate);
+        activeThemeContributed.add(canonical);
+        console.log(dim(`Template routing: ${canonical} → ${alias}`));
+      } else {
+        console.log(warning(
+          `Template routing: alias "${alias}" for "${canonical}" was not found in loaded templates — ` +
+          `make sure "${alias}.html" exists in your theme directory and compiled without errors.`
+        ));
+      }
+    }
+  }
+
+  // ==========================================================================
+  // STEP 5: Single-file detection — 4-layer cascade
+  //
+  // Only fires when the active theme contributed something (Layers 2+3 ran).
+  // Each layer is tried in order; the first match wins and exits the block.
+  // The index template compiled function is reused for all mapped types.
+  // ==========================================================================
+  if (activeThemeContributed.has('index')) {
+    const indexTpl = templatesCache.get('index');
+
+    // --- 5a: Explicit singleFile: true declaration ---
+    // Trust fully. Map ALL known page types (that the theme didn't already
+    // explicitly provide) to the active theme's index template.
+    if (themeMetadata.singleFile === true) {
+      console.log(info('Single-file theme (explicit singleFile: true)'));
+      for (const type of KNOWN_PAGE_TYPES) {
+        if (type !== 'index' && !activeThemeContributed.has(type)) {
+          templatesCache.set(type, indexTpl);
+          activeThemeContributed.add(type);
+        }
+      }
+    }
+
+    // --- 5b: handles: [...] partial declaration ---
+    // Trust for listed types only. Maps only the declared types to index.
+    // Useful when a theme has dedicated templates for some types but wants
+    // index to handle others (e.g., handles: ['category', 'series']).
+    else if (Array.isArray(themeMetadata.handles) && themeMetadata.handles.length > 0) {
+      console.log(info(`Single-file theme (handles: [${themeMetadata.handles.join(', ')}])`));
+      for (const type of themeMetadata.handles) {
+        if (typeof type === 'string' && !activeThemeContributed.has(type)) {
+          templatesCache.set(type, indexTpl);
+          activeThemeContributed.add(type);
+        }
+      }
+    }
+
+    // --- 5c: Auto-diff — only index was contributed by the active theme ---
+    // Safe automatic inference. If Layers 2+3 collectively only wrote 'index'
+    // into the cache, the theme is structurally single-file regardless of any
+    // metadata declaration.
+    else if (activeThemeContributed.size === 1 && activeThemeContributed.has('index')) {
+      console.log(info('Single-file theme (auto-detected: active theme contributed only index)'));
+      for (const type of KNOWN_PAGE_TYPES) {
+        if (type !== 'index' && !activeThemeContributed.has(type)) {
+          templatesCache.set(type, indexTpl);
+          activeThemeContributed.add(type);
+        }
+      }
+    }
+
+    // --- 5d: Regex heuristics — last resort ---
+    // Only fires when the active theme has index but not entry, and none of
+    // the above layers could determine single-file nature. Scans the active
+    // theme's raw index.html source for THYPRESS-specific variable patterns.
+    else if (!activeThemeContributed.has('entry')) {
+      let indexSource = '';
+
+      // Acquire the raw source of the active theme's index template
+      if (themePath) {
+        const idxPath = path.join(themePath, 'index.html');
+        if (fs.existsSync(idxPath)) {
+          try { indexSource = fs.readFileSync(idxPath, 'utf-8'); } catch {}
+        }
+      } else if (isActiveEmbedded && STATIC_EMBEDDED_TEMPLATES?.[activeTheme]) {
+        indexSource = STATIC_EMBEDDED_TEMPLATES[activeTheme]['index.html'] || '';
+      }
+
+      if (indexSource) {
+        // Strip front-matter before scanning so YAML fields don't confuse the regex
+        try {
+          const parsed = matter(indexSource);
+          indexSource = parsed.content;
+        } catch {}
+
+        const heuristicTypes = detectPageTypesFromSource(indexSource);
+
+        // Only act if more than just 'index' was detected — a single data point
+        // is not meaningful enough to trigger single-file behaviour.
+        if (heuristicTypes.size > 1) {
+          console.log(info(`Single-file theme (heuristic detection: ${[...heuristicTypes].join(', ')})`));
+          for (const type of heuristicTypes) {
+            if (!activeThemeContributed.has(type)) {
+              templatesCache.set(type, indexTpl);
+              activeThemeContributed.add(type);
+            }
+          }
+        }
+      }
+    }
   }
 
   // ==========================================================================
@@ -1018,6 +1366,12 @@ export async function loadTheme(themeName = null, siteConfig = {}) {
     `${themeAssets.size} assets`
   ));
 
+  if (activeThemeContributed.size > 0) {
+    console.log(dim(
+      `Active theme covers: ${[...activeThemeContributed].sort().join(', ')}`
+    ));
+  }
+
   return {
     templatesCache,
     themeAssets,
@@ -1026,310 +1380,3 @@ export async function loadTheme(themeName = null, siteConfig = {}) {
     themeMetadata
   };
 }
-
-// ============================================================================
-// TEMPLATE SELECTION
-// ============================================================================
-
-/**
- * Select the appropriate compiled template function for a given entry.
- *
- * Priority order:
- *   1. Explicit front-matter: template: "custom-template"
- *   2. Section-based:         content/docs/ → docs.html
- *   3. Index special case:    slug === 'index'
- *   4. Default chain:         entry → page → index
- */
-export function selectTemplate(entry, templates, defaultTemplate = 'entry') {
-  if (entry.frontMatter && entry.frontMatter.template) {
-    const explicitTemplate = templates.get(entry.frontMatter.template);
-    if (explicitTemplate) return explicitTemplate;
-  }
-
-  if (entry.section) {
-    const sectionTemplate = templates.get(entry.section);
-    if (sectionTemplate) return sectionTemplate;
-  }
-
-  if (entry.slug === 'index' || entry.slug === '') {
-    const indexTemplate = templates.get('index');
-    if (indexTemplate) return indexTemplate;
-  }
-
-  return templates.get(defaultTemplate)
-      || templates.get('entry')
-      || templates.get('page')
-      || templates.get('index');
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// // ============================================================================
-// // SINGLE-FILE THEME DETECTION (DEPRECATED DUE TO REGEX BLOATY DANGER BUT KEPT AS DOCUMENTATION)
-// // ============================================================================
-
-// /**
-//  * Detect which page types a single-file theme can handle.
-//  * Uses 5 detection layers from most explicit to most implicit.
-//  *
-//  * @param {string} templateSource - Raw template HTML source
-//  * @param {Object} metadata       - Theme metadata (from theme.json or front-matter)
-//  * @returns {Set<string>}
-//  */
-// function detectSingleFilePageTypes(templateSource, metadata = {}) {
-//   const detected = new Set();
-
-//   // Layer 1: Explicit declaration in metadata.handles
-//   if (metadata.handles && Array.isArray(metadata.handles)) {
-//     metadata.handles.forEach(type => detected.add(type));
-//     console.log(dim(`Explicit page types from metadata: ${Array.from(detected).join(', ')}`));
-//     return detected;
-//   }
-
-//   // Layer 2: Handlebars inline partials — {{#*inline "entry"}}
-//   const inlinePartialRegex = /\{\{#\*inline\s+"([^"]+)"\}\}/g;
-//   let match;
-//   while ((match = inlinePartialRegex.exec(templateSource)) !== null) {
-//     const name = match[1];
-//     if (['entry', 'index', 'tag', 'category', 'series', '404'].includes(name)) {
-//       detected.add(name);
-//     }
-//   }
-//   if (detected.size > 0) {
-//     console.log(dim(`Detected inline partials: ${Array.from(detected).join(', ')}`));
-//   }
-
-//   // Layer 3: Conditional pageType checks — (eq pageType "entry")
-//   const conditionalRegex = /\(eq\s+pageType\s+['"]([^'"]+)['"]\)/g;
-//   while ((match = conditionalRegex.exec(templateSource)) !== null) {
-//     const pageType = match[1];
-//     if (['entry', 'index', 'tag', 'category', 'series', '404'].includes(pageType)) {
-//       detected.add(pageType);
-//     }
-//   }
-//   if (detected.size > 0) {
-//     console.log(dim(`Detected conditional checks: ${Array.from(detected).join(', ')}`));
-//   }
-
-//   // Layer 4: Implicit detection from template patterns
-//   if (templateSource.includes('{{#if entry}}') || templateSource.match(/\{\{entry\./)) {
-//     detected.add('entry');
-//   }
-//   if (templateSource.includes('{{#each entries}}') || templateSource.includes('{{#if entries}}')) {
-//     detected.add('index');
-//     detected.add('tag');
-//     detected.add('category');
-//     detected.add('series');
-//   }
-//   if (templateSource.includes('{{#if tag}}') || /\{\{tag\}\}/.test(templateSource)) {
-//     detected.add('tag');
-//   }
-//   if (templateSource.includes('{{#if category}}') || /\{\{category\}\}/.test(templateSource)) {
-//     detected.add('category');
-//   }
-//   if (templateSource.includes('{{#if series}}') || /\{\{series\}\}/.test(templateSource)) {
-//     detected.add('series');
-//   }
-
-//   // Layer 5: Default fallback when nothing was detected
-//   if (detected.size === 0) {
-//     detected.add('entry');
-//     detected.add('index');
-//     console.log(dim('No explicit page type detection — defaulting to entry + index'));
-//   } else {
-//     console.log(dim(`Implicit detection found: ${Array.from(detected).join(', ')}`));
-//   }
-
-//   return detected;
-// }
-
-
-
-// // ============================================================================
-// // THEME LOADER — 3-Layer Inheritance Chain
-// // ============================================================================
-
-// /**
-//  * Load and resolve all theme layers into a unified templatesCache + themeAssets.
-//  *
-//  * Resolution order (last layer wins):
-//  *
-//  *   Layer 1 — Fallback embedded  (config.defaultTheme || DEFAULT_THEME_ID)
-//  *             Always loaded. Provides the safety-net skeleton.
-//  *
-//  *   Layer 2 — Active  embedded  (config.theme, only if key exists in EMBEDDED_TEMPLATES)
-//  *             Skipped when: activeTheme === fallbackId, or not in registry.
-//  *
-//  *   Layer 3 — Active  disk      (templates/<config.theme>/, if directory exists on disk)
-//  *             Works for any theme name. Allows user customization over any embedded theme.
-//  *
-//  * Single-file detection runs as a post-processing step after all layers are settled:
-//  *   If 'entry' template is absent, the index template is analyzed and registered
-//  *   for all page types it can handle.
-//  *
-//  * @param {string|null} themeName  - Value of config.theme (null = use fallback only)
-//  * @param {Object}      siteConfig - Full site configuration object
-//  * @returns {Promise<{
-//  *   templatesCache: Map,
-//  *   themeAssets:    Map,
-//  *   activeTheme:    string,
-//  *   validation:     { valid: boolean, errors: string[], warnings: string[] },
-//  *   themeMetadata:  Object
-//  * }>}
-//  */
-// export async function loadTheme(themeName = null, siteConfig = {}) {
-//   const templatesDir = path.join(process.cwd(), 'templates');
-//   const templatesCache = new Map();
-//   const themeAssets = new Map();
-
-//   let activeTheme = themeName;
-//   let themeMetadata = {};
-
-//   // ==========================================================================
-//   // STEP 0: Clean slate
-//   // Unregister ALL Handlebars partials before loading any layer.
-//   // Prevents stale partial bleed between hot-reloads and theme switches.
-//   // ==========================================================================
-//   _clearAllHandlebarsPartials();
-
-//   // ==========================================================================
-//   // STEP 1: Fallback (safety-net) embedded layer — ALWAYS loaded
-//   // ==========================================================================
-//   const fallbackId = siteConfig.defaultTheme || DEFAULT_THEME_ID;
-//   console.log(info(`Layer 1 (fallback): ${fallbackId}`));
-//   await _loadEmbeddedThemeLayer(fallbackId, templatesCache, themeAssets);
-
-//   // ==========================================================================
-//   // STEP 2: Active embedded layer
-//   // Condition: activeTheme is set, is different from the fallback,
-//   //            AND exists as a key in EMBEDDED_TEMPLATES.
-//   // ==========================================================================
-//   const isActiveEmbedded = !!(
-//     activeTheme &&
-//     activeTheme !== fallbackId &&
-//     STATIC_EMBEDDED_TEMPLATES &&
-//     Object.prototype.hasOwnProperty.call(STATIC_EMBEDDED_TEMPLATES, activeTheme)
-//   );
-
-//   if (isActiveEmbedded) {
-//     console.log(info(`Layer 2 (embedded active): ${activeTheme}`));
-//     await _loadEmbeddedThemeLayer(activeTheme, templatesCache, themeAssets);
-//     themeMetadata = _loadEmbeddedThemeMetadata(activeTheme);
-//   }
-
-//   // ==========================================================================
-//   // STEP 3: Active disk layer
-//   // Condition: activeTheme is set AND templates/<activeTheme>/ exists on disk.
-//   // This layer works for any theme name — including dot-prefixed embedded overrides.
-//   // ==========================================================================
-//   let themePath = null;
-//   let validation = { valid: true, errors: [], warnings: [] };
-
-//   if (activeTheme) {
-//     const candidatePath = path.join(templatesDir, activeTheme);
-
-//     if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isDirectory()) {
-//       themePath = candidatePath;
-//       console.log(success(`Layer 3 (disk): ${activeTheme}`));
-
-//       // Disk metadata takes precedence over embedded metadata
-//       const diskMeta = _loadThemeMetadataFromDisk(themePath);
-//       if (Object.keys(diskMeta).length > 0) {
-//         themeMetadata = diskMeta;
-//       }
-
-//       _loadDiskThemeLayer(themePath, activeTheme, templatesCache, themeAssets, siteConfig);
-
-//       // Validate disk themes (embedded themes are pre-validated by the generator).
-//       // Exception: skip validation for DEFAULT_THEME_ID — it is the trusted safety net.
-//       if (activeTheme !== DEFAULT_THEME_ID) {
-//         validation = validateTheme(themePath, templatesCache, activeTheme, themeMetadata);
-//       }
-//     } else if (!isActiveEmbedded && activeTheme !== fallbackId) {
-//       // Theme was requested but not found anywhere
-//       console.log(warning(`Theme "${activeTheme}" not found on disk or in embedded registry`));
-//       console.log(info(`Falling back to: ${fallbackId}`));
-//     }
-//   }
-
-//   // ==========================================================================
-//   // SINGLE-FILE DETECTION  (post-processing, after all layers are settled)
-//   //
-//   // If 'entry' is still absent after all layers, this is a single-file theme.
-//   // Analyze the index template source and map it to all detected page types.
-//   // ==========================================================================
-//   if (!templatesCache.has('entry') && templatesCache.has('index')) {
-//     const indexTpl = templatesCache.get('index');
-
-//     // Obtain source for analysis — prioritize disk, then embedded active, then fallback
-//     let indexSource = '';
-
-//     if (themePath) {
-//       const idxPath = path.join(themePath, 'index.html');
-//       if (fs.existsSync(idxPath)) {
-//         indexSource = fs.readFileSync(idxPath, 'utf-8');
-//       }
-//     } else if (isActiveEmbedded && STATIC_EMBEDDED_TEMPLATES[activeTheme]) {
-//       indexSource = STATIC_EMBEDDED_TEMPLATES[activeTheme]['index.html'] || '';
-//     } else if (STATIC_EMBEDDED_TEMPLATES && STATIC_EMBEDDED_TEMPLATES[fallbackId]) {
-//       indexSource = STATIC_EMBEDDED_TEMPLATES[fallbackId]['index.html'] || '';
-//     }
-
-//     console.log(info('Single-file theme — analyzing page type capabilities...'));
-//     const detectedTypes = detectSingleFilePageTypes(indexSource, themeMetadata);
-
-//     detectedTypes.forEach(type => {
-//       if (!templatesCache.has(type)) {
-//         templatesCache.set(type, indexTpl);
-//       }
-//     });
-
-//     const allTypes = ['entry', 'index', 'tag', 'category', 'series', '404'];
-//     const usingFallback = allTypes.filter(t => !detectedTypes.has(t));
-
-//     console.log(success(`Single-file handles: ${Array.from(detectedTypes).join(', ')}`));
-//     if (usingFallback.length > 0) {
-//       console.log(dim(`Using embedded fallback for: ${usingFallback.join(', ')}`));
-//     }
-//   }
-
-//   // ==========================================================================
-//   // SUMMARY
-//   // ==========================================================================
-//   console.log(success(
-//     `Theme resolved — ` +
-//     `${templatesCache.size} templates, ` +
-//     `${Object.keys(Handlebars.partials).length} partials, ` +
-//     `${themeAssets.size} assets`
-//   ));
-
-//   return {
-//     templatesCache,
-//     themeAssets,
-//     activeTheme: activeTheme || fallbackId,
-//     validation,
-//     themeMetadata
-//   };
-// }
